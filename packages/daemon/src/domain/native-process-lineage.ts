@@ -212,12 +212,15 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
 }
 
 /** Require a live process in the pane's own lineage whose argv names both the
- * declared runtime and the exact native resume identity. */
+ * declared runtime and the exact native resume identity. For Claude, one search also accepts a
+ * recorded rotation (#1077): the process that qualified it, naming the token it was launched on,
+ * with no Claude beneath it in its foreground process group. */
 export function findExactNativeResumeProcess(
   processes: NativeProcessRow[],
   panePid: number,
   runtime: string | null,
   expectedToken: string,
+  rotation?: ClaudeResumeRotation | null,
 ): NativeProcessRow | null {
   if (runtime === "codex") return selectNativeProcess(processes, panePid, expectedToken, true)?.process ?? null;
   if (runtime !== "claude-code") return null;
@@ -235,10 +238,27 @@ export function findExactNativeResumeProcess(
     if (visited.has(pid)) continue;
     visited.add(pid);
     const process = byPid.get(pid);
-    if (process && commandUsesExpectedToken(process.command, runtime, expectedToken)) return process;
+    if (process && (commandUsesExpectedToken(process.command, runtime, expectedToken)
+      || (rotationProcess(process, rotation) && commandUsesExpectedToken(process.command, runtime, rotation!.token)
+        && !claudeBeneath(process, byParent)))) return process;
     for (const child of byParent.get(pid) ?? []) queue.push(child.pid);
   }
   return null;
+}
+
+/** Whether a Claude process runs beneath `top` in its foreground process group: the deepest Claude
+ *  receives input, so `top`'s argv no longer says which conversation the seat holds. */
+function claudeBeneath(top: NativeProcessRow, byParent: Map<number, NativeProcessRow[]>): boolean {
+  const queue = [...(byParent.get(top.pid) ?? [])];
+  const seen = new Set<number>([top.pid]);
+  while (queue.length > 0) {
+    const row = queue.shift()!;
+    if (seen.has(row.pid)) continue;
+    seen.add(row.pid);
+    if (row.pgid === top.tpgid && claudeProcess(row)) return true;
+    queue.push(...(byParent.get(row.pid) ?? []));
+  }
+  return false;
 }
 
 /** The same OS observation serves menu input, restore proof and periodic identity.
@@ -269,6 +289,19 @@ export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
 }
 
 export type NativeProcessLister = () => NativeProcessRow[] | Promise<NativeProcessRow[]>;
+
+/** One OS process, by pid and `ps` start time: a reused pid has another start time. */
+export interface ClaudeLaunchedProcess { pid: number; startedAt: string }
+
+/** A recorded Claude resume rotation (#1077): OpenRig launched `process` to resume `token`, and that
+ *  process's first hook said the conversation continued as the stored token. argv may name `token`
+ *  instead of the stored one only in that same process. */
+export interface ClaudeResumeRotation { token: string; process: ClaudeLaunchedProcess }
+
+function rotationProcess(row: NativeProcessRow, rotation: ClaudeResumeRotation | null | undefined): boolean {
+  return !!rotation && row.pid === rotation.process.pid && !!row.startedAt && row.startedAt === rotation.process.startedAt;
+}
+
 export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string };
 export type CodexProcessObservation = NativeProcessObservation;
 
@@ -297,7 +330,7 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
     fingerprint: JSON.stringify(chain.map(row => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command, row.executablePath])) }));
 }
 
-function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string, rotatedFromToken?: string | null): NativeProcessObservation | null {
+function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string, rotation?: ClaudeResumeRotation | null): NativeProcessObservation | null {
   const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
   if (matches.length !== 1) return null;
   const observation = matches[0]!;
@@ -305,7 +338,7 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   if (runtime === "claude-code") {
     if (!expectedToken) return null;
     const launched = claudeSessionToken(tokens(process.command).slice(1));
-    if (launched !== expectedToken && !(rotatedFromToken && launched === rotatedFromToken)) return null;
+    if (launched !== expectedToken && !(launched === rotation?.token && rotationProcess(process, rotation))) return null;
   } else {
     const resumeToken = codexResumeToken(tokens(process.command).slice(1));
     if (requireResume && !expectedToken) return null;
@@ -323,16 +356,16 @@ async function observeNativePaneProcess(input: {
   requireResume?: boolean;
   /** Canonical executable frozen by the managed launch, never re-resolved at observation time. */
   selectedExecutable?: string;
-  /** Claude only: the launch token a resume-sourced, current-generation hook replaced with
-   *  `expectedToken` (`claudeRotatedFromToken`). argv may name it instead of `expectedToken`. */
-  rotatedFromToken?: string | null;
+  /** Claude only: the recorded rotation into `expectedToken` (`claudeResumeRotation`). Its process
+   *  may name the rotation's token instead of `expectedToken`. */
+  rotation?: ClaudeResumeRotation | null;
 }, runtime: NativeRuntime): Promise<NativeProcessObservation | null> {
   try {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
     const rows = await (input.listProcesses ?? listNativeProcesses)();
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
-      runtime === "claude-code" ? input.rotatedFromToken : undefined);
+      runtime === "claude-code" ? input.rotation : undefined);
   } catch { return null; }
 }
 
@@ -347,35 +380,38 @@ export async function verifyCodexPaneProcess(input: Parameters<typeof observeCod
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 
-/** #1077 — whether a Claude hook was emitted by the process OpenRig launched to resume `launchToken`:
+/** #1077 — the process OpenRig launched to resume `launchToken`, when it emitted a Claude hook:
  *  the pane's one foreground Claude, whose argv names that token, must be the hook process's parent
  *  or grandparent (Claude runs a hook through a shell, which may exec it), with no other Claude
  *  between. A `claude -p --resume` started from inside the seat inherits the launch environment,
- *  but its own hooks have that child as their nearest Claude. Fails closed on anything unobserved. */
+ *  but its own hooks have that child as their nearest Claude. Null on anything unobserved. */
 export async function claudeHookFromLaunchedProcess(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null> };
   listProcesses?: NativeProcessLister;
   launchToken: string;
   hookPid: number;
-}): Promise<boolean> {
+}): Promise<ClaudeLaunchedProcess | null> {
   try {
     const panePid = await input.tmux.getPanePid(input.target);
-    if (!panePid) return false;
+    if (!panePid) return null;
     const rows = await (input.listProcesses ?? listNativeProcesses)();
     const launched = selectNativeProcess(rows, panePid, input.launchToken, false, "claude-code");
-    if (!launched) return false;
+    if (!launched) return null;
     const byPid = new Map(rows.map((row) => [row.pid, row]));
     let current = byPid.get(input.hookPid);
-    if (!current) return false;
+    if (!current) return null;
     for (let hop = 0; hop < 2; hop++) {
       current = byPid.get(current.ppid);
-      if (!current) return false;
-      if (current.pid === launched.process.pid) return current.startedAt === launched.process.startedAt;
-      if (claudeExecutable(tokens(current.command)[0] ?? "") || /claude/i.test(current.executableName ?? "")) return false;
+      if (!current) return null;
+      if (current.pid === launched.process.pid) {
+        return current.startedAt && current.startedAt === launched.process.startedAt
+          ? { pid: current.pid, startedAt: current.startedAt } : null;
+      }
+      if (claudeExecutable(tokens(current.command)[0] ?? "") || /claude/i.test(current.executableName ?? "")) return null;
     }
-    return false;
-  } catch { return false; }
+    return null;
+  } catch { return null; }
 }
 
 export async function observeClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
@@ -469,13 +505,13 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
         // uncertainty. Live lineage/binding conflicts and strict resume proof stay
         // separate. A shim's token is never inherited by an opaque child.
         // The one exception is a launch token the runtime itself reported resuming
-        // into the stored one, for this occupant generation (rotatedFromToken).
-        const rotatedFrom = input.rotatedFromToken || null;
-        const launchedAs = (token: unknown) => token === input.expectedToken || (!!rotatedFrom && token === rotatedFrom);
-        if (named.size === 1 && ![...named].some(launchedAs)) {
+        // into the stored one, named by the process that reported it (rotation).
+        const launchedAs = (index: number) => identities[index] === input.expectedToken
+          || (identities[index] === input.rotation?.token && rotationProcess(chain[index]!.process, input.rotation));
+        if (named.size === 1 && !chain.some((_link, index) => launchedAs(index))) {
           return { state: "unknown", detail: "Claude launch identity differs from the stored conversation; current conversation is unverified", fingerprint };
         }
-        return launchedAs(identities[0])
+        return launchedAs(0)
           ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }
           : { ...unknown, fingerprint };
       }

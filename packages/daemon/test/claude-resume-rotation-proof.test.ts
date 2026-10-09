@@ -14,7 +14,7 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { SessionRegistry, claudeRotatedFromToken } from "../src/domain/session-registry.js";
+import { SessionRegistry, claudeResumeRotation } from "../src/domain/session-registry.js";
 import { verifyClaudePaneProcess, observeClaudeDelivery, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 const require = createRequire(import.meta.url);
@@ -25,6 +25,8 @@ const relay = require("../assets/plugins/openrig-core/hooks/scripts/activity-rel
 const T1 = "00000000-0000-4000-8000-000000001077";
 const T2 = "00000000-0000-4000-8000-000000001078";
 const T3 = "00000000-0000-4000-8000-000000001079";
+
+const launchedClaude = { pid: 4242, startedAt: "Fri Oct  9 01:00:00 2026" };
 
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
@@ -46,8 +48,13 @@ function seat(opts: { armed?: boolean; launchWrite?: boolean } = {}) {
   ).get(session.id) as { resume_token: string; resume_provenance: string; resume_launch_token: string | null; resume_rotated_from: string | null };
   // By default the hook comes from the process OpenRig launched, whose command carried the marker.
   const hook = (token: string, source: string | null, currentGeneration = true, resumeLaunch: string | null = T1, launchedProcess = true) =>
-    registry.recordHookSessionIdentity(session.id, "claude_id", token, { source, currentGeneration, resumeLaunch, launchedProcess });
-  return { db, registry, session, node, generation, row, hook };
+    registry.recordHookSessionIdentity(session.id, "claude_id", token,
+      { source, currentGeneration, resumeLaunch, launchedProcess: launchedProcess ? launchedClaude : null });
+  const rotation = () => claudeResumeRotation(db.prepare(
+    "SELECT resume_token, resume_provenance, resume_rotated_from, resume_rotated_process FROM sessions WHERE id = ?",
+  ).get(session.id) as Parameters<typeof claudeResumeRotation>[0]);
+  const rotatedFrom = () => rotation()?.token ?? null;
+  return { db, registry, session, node, generation, row, hook, rotation, rotatedFrom };
 }
 
 describe("the first hook after OpenRig's --resume launch", () => {
@@ -55,8 +62,13 @@ describe("the first hook after OpenRig's --resume launch", () => {
     const s = seat({ launchWrite });
     expect(s.hook(T2, "resume")).toBe(true);
     expect(s.row()).toEqual({ resume_token: T2, resume_provenance: "hook", resume_launch_token: null, resume_rotated_from: T1 });
-    expect(claudeRotatedFromToken(s.row())).toBe(T1);
+    expect(s.rotatedFrom()).toBe(T1);
+    // The rotation keeps the process that qualified it; a later token change drops both.
+    expect(s.rotation()?.process).toEqual(launchedClaude);
     expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(true);
+    s.registry.updateResumeToken(s.session.id, "claude_id", T3, "operator");
+    expect(s.db.prepare("SELECT resume_rotated_from, resume_rotated_process FROM sessions WHERE id = ?").get(s.session.id))
+      .toEqual({ resume_rotated_from: null, resume_rotated_process: null });
   });
 
   it.each(["clear", "startup", "compact", null])("source %s consumes the launch and names nothing", (source) => {
@@ -65,7 +77,7 @@ describe("the first hook after OpenRig's --resume launch", () => {
     expect(s.row()).toMatchObject({ resume_token: T2, resume_launch_token: null, resume_rotated_from: null });
     // A resume after that (in-process /resume, a child `claude -p --resume`) has no launch to name.
     s.hook(T3, "resume");
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
+    expect(s.rotatedFrom()).toBeNull();
   });
 
   it("a resume that kept the id consumes the launch; a later in-process /resume names nothing", () => {
@@ -73,7 +85,7 @@ describe("the first hook after OpenRig's --resume launch", () => {
     s.hook(T1, "resume");
     expect(s.row()).toMatchObject({ resume_token: T1, resume_launch_token: null, resume_rotated_from: null });
     s.hook(T2, "resume");
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
+    expect(s.rotatedFrom()).toBeNull();
   });
 
   it.each([
@@ -84,7 +96,7 @@ describe("the first hook after OpenRig's --resume launch", () => {
     s.hook(T2, "resume", true, marker);
     expect(s.row()).toMatchObject({ resume_token: T2, resume_launch_token: null, resume_rotated_from: null });
     s.hook(T3, "resume");
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
+    expect(s.rotatedFrom()).toBeNull();
   });
 
   it("a hook not observed to come from the launched process (a child claude -p inheriting the marker) names nothing", () => {
@@ -98,7 +110,7 @@ describe("the first hook after OpenRig's --resume launch", () => {
     s.hook(T3, "resume", false);
     expect(s.row()).toMatchObject({ resume_launch_token: T1, resume_rotated_from: null });
     s.hook(T2, "resume");
-    expect(claudeRotatedFromToken(s.row())).toBe(T1);
+    expect(s.rotatedFrom()).toBe(T1);
   });
 
   it("a hook the provenance rank refuses still consumes the launch and records nothing", () => {
@@ -111,11 +123,11 @@ describe("the first hook after OpenRig's --resume launch", () => {
   it("without an armed launch (fresh, or a process OpenRig did not launch) nothing qualifies", () => {
     const fresh = seat({ armed: false });
     fresh.hook(T2, "resume");
-    expect(claudeRotatedFromToken(fresh.row())).toBeNull();
+    expect(fresh.rotatedFrom()).toBeNull();
     const freshFallback = seat();
     freshFallback.registry.recordResumeLaunch(freshFallback.session.id, null);
     freshFallback.hook(T2, "resume");
-    expect(claudeRotatedFromToken(freshFallback.row())).toBeNull();
+    expect(freshFallback.rotatedFrom()).toBeNull();
   });
 });
 
@@ -134,20 +146,20 @@ describe("after a recorded rotation", () => {
     const s = rotated();
     s.hook(T3, source);
     expect(s.row()).toMatchObject({ resume_token: T3, resume_rotated_from: null });
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
+    expect(s.rotatedFrom()).toBeNull();
   });
 
   it("a later hook for the same id (a compaction) keeps it", () => {
     const s = rotated();
     s.hook(T2, "compact");
-    expect(claudeRotatedFromToken(s.row())).toBe(T1);
+    expect(s.rotatedFrom()).toBe(T1);
   });
 
   it("an operator token, or any other write that changes the token, drops it", () => {
     const s = rotated();
     s.registry.updateResumeToken(s.session.id, "claude_id", T3, "operator");
     expect(s.row()).toMatchObject({ resume_token: T3, resume_provenance: "operator", resume_rotated_from: null });
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
+    expect(s.rotatedFrom()).toBeNull();
   });
 
   it("an equal-value refresh or a later launch-path write of T1 keeps it", () => {
@@ -155,7 +167,7 @@ describe("after a recorded rotation", () => {
     s.registry.updateResumeToken(s.session.id, "claude_id", T2, "hook");
     s.registry.updateResumeToken(s.session.id, "claude_id", T1, "scrape");
     s.registry.recordResumeAttempt(s.session.id, "claude_id", T1);
-    expect(claudeRotatedFromToken(s.row())).toBe(T1);
+    expect(s.rotatedFrom()).toBe(T1);
   });
 });
 
@@ -200,8 +212,10 @@ describe("the identity proof", () => {
     { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "claude", command: `claude --resume ${argvToken}`, startedAt },
   ];
   const tmux = { getPanePid: async () => 100 };
-  const proof = (argvToken: string, rotatedFromToken: string | null) => ({
-    target: "%1", tmux, listProcesses: async () => rows(argvToken), expectedToken: T2, rotatedFromToken,
+  // The rotation names the process that qualified it: 101 at its start time.
+  const proof = (argvToken: string, rotatedFrom: string | null, qualified = { pid: 101, startedAt }) => ({
+    target: "%1", tmux, listProcesses: async () => rows(argvToken), expectedToken: T2,
+    rotation: rotatedFrom ? { token: rotatedFrom, process: qualified } : null,
   });
 
   it("accepts the launch token a resume replaced", async () => {
@@ -216,6 +230,16 @@ describe("the identity proof", () => {
   it("refuses the launch token without a recorded resume (the /clear case)", async () => {
     expect(await verifyClaudePaneProcess(proof(T1, null))).toBeNull();
     expect(await observeClaudeDelivery(proof(T1, null))).toMatchObject({ state: "unknown" });
+  });
+
+  it.each([
+    ["another pid", { pid: 202, startedAt }],
+    ["a reused pid with another start time", { pid: 101, startedAt: "Fri Oct  9 02:00:00 2026" }],
+  ])("refuses the launch token in a process other than the qualified one (%s)", async (_label, qualified) => {
+    expect(await verifyClaudePaneProcess(proof(T1, T1, qualified))).toBeNull();
+    expect(await observeClaudeDelivery(proof(T1, T1, qualified))).toMatchObject({ state: "unknown" });
+    // The stored token itself never depended on the rotation's process.
+    expect(await verifyClaudePaneProcess(proof(T2, T1, qualified))).not.toBeNull();
   });
 
   it("refuses a third token even with a recorded resume", async () => {

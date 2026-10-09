@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
-import { claudeRotatedFromToken, type SessionRegistry } from "./session-registry.js";
+import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
@@ -1669,15 +1669,16 @@ export class RestoreOrchestrator {
     }
 
     const sessRow = this.db.prepare(
-      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_rotated_from FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null } | undefined;
+      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_rotated_from, resume_rotated_process FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null } | undefined;
     if (!sessRow || sessRow.session_name !== sessionName) {
       return { ok: false, code: "binding_mismatch", detail: `Canonical binding ${sessionName} does not match the latest session row.` };
     }
     const expectedResumeToken = sessRow.resume_token;
     // The one alternative argv may carry: the token OpenRig launched this row to resume, when the
-    // first hook after that launch recorded Claude continuing it as the stored token (#1077).
-    const rotatedFromToken = sessRow.resume_type === "claude_id" ? claudeRotatedFromToken(sessRow) : null;
+    // first hook after that launch recorded Claude continuing it as the stored token (#1077), and
+    // only in the process that sent that hook.
+    const rotation = sessRow.resume_type === "claude_id" ? claudeResumeRotation(sessRow) : null;
     if (!expectedResumeToken) {
       return { ok: false, code: "resume_token_not_used", detail: "No resume token recorded on the latest session row." };
     }
@@ -1701,28 +1702,19 @@ export class RestoreOrchestrator {
       "SELECT runtime FROM nodes WHERE id = ?"
     ).get(nodeId) as { runtime: string | null } | undefined;
     const runtime = nodeRow?.runtime ?? null;
-    const proveLineage = (token: string) => rebindAndVerifyPaneIdentity({
+    // One exact-lineage check per process, accepting the stored token or the recorded rotation.
+    const identity = await rebindAndVerifyPaneIdentity({
       db: this.db,
       sessionRegistry: this.sessionRegistry,
       tmux: this.tmuxAdapter,
       nodeId,
       sessionName,
       runtime,
-      expectedResumeToken: token,
+      expectedResumeToken,
       requireExactResumeLineage: true,
+      resumeRotation: rotation,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });
-    // The stored token first, exactly as before; the recorded rotation only when that fails. Both
-    // are the same exact-lineage proof.
-    let lineageToken = expectedResumeToken;
-    let identity = await proveLineage(expectedResumeToken);
-    if (!identity.ok && rotatedFromToken) {
-      const rotated = await proveLineage(rotatedFromToken);
-      if (rotated.ok) {
-        identity = rotated;
-        lineageToken = rotatedFromToken;
-      }
-    }
     if (!identity.ok) {
       return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };
     }
@@ -1731,7 +1723,8 @@ export class RestoreOrchestrator {
     const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
       target: identity.pane,
       tmux: this.tmuxAdapter,
-      expectedToken: lineageToken,
+      expectedToken: expectedResumeToken,
+      rotation,
       requireResume: true,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });

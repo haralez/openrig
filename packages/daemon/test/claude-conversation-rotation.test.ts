@@ -4,7 +4,7 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { SessionRegistry, claudeRotatedFromToken } from "../src/domain/session-registry.js";
+import { SessionRegistry, claudeResumeRotation } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -55,7 +55,8 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     // The process table while a SessionStart hook runs: the pane's launched Claude (102) ran the
     // relay through a shell (110 -> 111); a `claude -p --resume` its Bash tool started (120, own
     // process group) ran its own relay (121 -> 122), inheriting the launch environment.
-    const hookStartedAt = "Sat Oct  3 00:59:00 2026";
+    // The same processes the delivery checks below observe (102 keeps its start time).
+    const hookStartedAt = "Sat Oct  3 01:00:00 2026";
     const hookRows: NativeProcessRow[] = [
       { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt: hookStartedAt },
       { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /fixture/launch", startedAt: hookStartedAt },
@@ -186,11 +187,11 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     expect(send).toHaveBeenCalledTimes(1);
     const result = await send.mock.results[0]!.value;
     const stored = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(session.id) as { resume_token: string };
-    const rotation = db.prepare("SELECT resume_token, resume_provenance, resume_rotated_from FROM sessions WHERE id = ?")
-      .get(session.id) as Parameters<typeof claudeRotatedFromToken>[0];
+    const rotation = db.prepare("SELECT resume_token, resume_provenance, resume_rotated_from, resume_rotated_process FROM sessions WHERE id = ?")
+      .get(session.id) as Parameters<typeof claudeResumeRotation>[0];
     // Independent of delivery effects: strict identity stays unproved for a mismatch.
     const input = { target: "%1", tmux, listProcesses: async () => rows, expectedToken: stored.resume_token,
-      rotatedFromToken: claudeRotatedFromToken(rotation) };
+      rotation: claudeResumeRotation(rotation) };
     const observed = await observeClaudeDelivery(input);
     const strict = await verifyClaudePaneProcess(input);
     return { result, calls, stored, observed, strict };

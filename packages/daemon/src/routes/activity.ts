@@ -10,7 +10,7 @@ import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
-import { claudeHookFromLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
+import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
@@ -228,7 +228,7 @@ activityRoutes.post("/hooks", async (c) => {
     // Only for a hook that could name the armed launch: was it the launch's first SessionStart (the
     // relay records that locally, so a first hook lost in delivery still counts), and was it sent
     // by the process OpenRig launched?
-    let launchedProcess = false;
+    let launchedProcess: ClaudeLaunchedProcess | null = null;
     const armed = runtime === "claude-code" && currentGeneration && source === "resume" && resumeLaunch
       && body.resumeLaunchFirst === true ? sessionRegistry.armedResumeLaunch(resolved.sessionId) : null;
     const hookPid = typeof body.hookPid === "number" && Number.isInteger(body.hookPid) && body.hookPid > 0 ? body.hookPid : null;
