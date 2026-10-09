@@ -6,10 +6,10 @@ import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { UpCommandRouter } from "../domain/up-command-router.js";
 import type { RigRepository } from "../domain/rig-repository.js";
-import { summarizeSnapshot, type SnapshotRepository } from "../domain/snapshot-repository.js";
+import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
-import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
+import { chooseRestoreSnapshot, runExistingRigRestore } from "../domain/existing-rig-restore.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
 import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
@@ -96,33 +96,10 @@ function getDeps(c: { get: (key: string) => unknown }) {
  * Shared helper used by both /api/up (rig_name) and /api/rigs/:rigId/up (Explorer).
  */
 async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }, freshLogicalIds?: string[], plan?: boolean, nonInterruptive?: boolean) {
-  const { snapshotRepo, restoreOrchestrator } = deps;
-
-  const rig = deps.rigRepo.getRig(rigId);
-  if (!rig) {
-    return c.json({ error: `Rig ${rigId} not found`, code: "rig_not_found" }, 404);
-  }
-
-  const automaticSelection = snapshotRepo.selectRestoreUsable(rigId);
-  let snapshot = automaticSelection.ok ? automaticSelection.snapshot : null;
-  let snapshotSelection = automaticSelection.ok ? automaticSelection.selection : undefined;
-  let staleSnapshot = false;
-  if (snapshot && !snapshotMatchesCurrentOccupants(snapshotRepo.db, rig, snapshot)) {
-    snapshot = null;
-    snapshotSelection = undefined;
-    staleSnapshot = true;
-  }
-  let capturedCurrentState = false;
-  if (!snapshot) {
-    const eligibility = assessCurrentStateRehydrateEligibility(snapshotRepo.db, rig);
-    if (!eligibility.ok) {
-      return c.json({
-        error: `Rig exists but ${staleSnapshot ? "its restore snapshots name an older occupant" : "has no restore-usable snapshot"} and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>`,
-        code: "no_snapshot",
-        blockers: eligibility.blockers,
-      }, 404);
-    }
-  }
+  const { snapshotRepo } = deps;
+  const choice = chooseRestoreSnapshot(deps, rigId);
+  if (!choice.ok) return c.json(choice.body, choice.status);
+  const { rig, staleSnapshot } = choice;
 
   // OPR.0.3.4.4 — read-only plan gate, BEFORE any restore mutation. The
   // rig_name path previously early-returned past the bootstrap plan gate, so
@@ -131,33 +108,18 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   // snapshot capture (itself a mutation) is reported as would-happen, never
   // performed.
   if (plan) {
-    return c.json(buildRestorePlanPreview(rig, snapshot ?? null, collectPreviewSessionRows(snapshotRepo.db, rig, snapshot ?? null), freshLogicalIds, Date.now(), readFreshOccupantRelations(snapshotRepo.db, rig.rig.id)), 200);
-  }
-
-  if (!snapshot) {
-    snapshot = deps.snapshotCapture.captureSnapshot(rigId, "auto-rehydrate");
-    snapshotSelection = {
-      ...summarizeSnapshot(snapshot),
-      mode: "automatic",
-      rationale: "automatic rehydrate captured current eligible state because no current-occupant snapshot was usable",
-      newerUsableAlternative: null,
-    };
-    capturedCurrentState = true;
-  }
-
-  if (!restoreOrchestrator) {
-    return c.json({ error: "Restore orchestrator not available" }, 500);
+    return c.json(buildRestorePlanPreview(rig, choice.snapshot ?? null, collectPreviewSessionRows(snapshotRepo.db, rig, choice.snapshot ?? null), freshLogicalIds, Date.now(), readFreshOccupantRelations(snapshotRepo.db, rig.rig.id)), 200);
   }
 
   const fs = await import("node:fs");
-  const result = await restoreOrchestrator.restore(snapshot.id, {
-    adapters: deps.runtimeAdapters ?? {},
-    fsOps: { exists: (p: string) => fs.existsSync(p) },
-    // OPR.0.3.4.2 — operation B opt-in seats from `rig up --existing --fresh`.
+  const { snapshot, capturedCurrentState, result } = await runExistingRigRestore(deps, choice, {
     freshLogicalIds,
     nonInterruptive,
-    snapshotSelection,
+    exists: (p: string) => fs.existsSync(p),
   });
+  if (!result.ok && result.code === "restore_unavailable") {
+    return c.json({ error: result.message }, 500);
+  }
   if (!result.ok) {
     if (result.code === "pre_restore_validation_failed") {
       return c.json({

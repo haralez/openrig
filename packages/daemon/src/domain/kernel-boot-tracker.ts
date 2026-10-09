@@ -42,6 +42,13 @@ export interface KernelAgentStatus {
   runtime: string;
   /** Startup status from the sessions table. Same enum as session-registry. */
   startupStatus: "pending" | "ready" | "attention_required" | "failed";
+  /** Present when the seat's newest session is detached (its tmux session is gone) or exited. */
+  down?: true;
+}
+
+/** Reconcile marks a session whose tmux session is gone `detached`; teardown marks it `exited`. */
+function isDownSession(session: Pick<Session, "status">): boolean {
+  return session.status === "detached" || session.status === "exited";
 }
 
 export interface KernelBootStatus {
@@ -86,6 +93,7 @@ export class KernelBootTracker {
   private degradedTimer: ReturnType<typeof setTimeout> | null = null;
   private degradedEmitted = false;
   private bootstrapInFlight = false;
+  private managedKernelLive = false;
 
   constructor(private readonly deps: KernelBootTrackerDeps) {}
 
@@ -97,6 +105,14 @@ export class KernelBootTracker {
     this.state = "skipped";
     this.detail = detail;
     this.firstUnreadySince = null;
+  }
+
+  /** The daemon skipped its boot because a kernel rig already exists with seats still running. Its
+   *  status then follows those seats when they read ready or partial_ready (the same aggregation as
+   *  a cold boot), instead of always `skipped`. Otherwise it stays `skipped`, as before, so a running
+   *  kernel whose seats are not ready yet never newly blocks `rig start`. */
+  observeManagedKernel(): void {
+    this.managedKernelLive = true;
   }
 
   /** Auth-blocked terminal. Operator sees the 3-part error in detail. */
@@ -118,8 +134,8 @@ export class KernelBootTracker {
   /** Begin tracking an in-flight bootstrap. The bootstrap promise
    *  is awaited internally; the caller does NOT block on it. */
   startBooting(
-    variant: string,
-    bootstrapPromise: Promise<BootstrapResult>,
+    variant: string | null,
+    bootstrapPromise: Promise<Pick<BootstrapResult, "errors">>,
     expectedSeats?: readonly string[] | null,
   ): void {
     if (this.bootstrapInFlight) return;
@@ -149,6 +165,9 @@ export class KernelBootTracker {
     // promote to ready / partial_ready based on agent startup_status.
     if (state === "booting" && !this.bootstrapInFlight) {
       kernelState = this.aggregateReadinessFromAgents(agents);
+    } else if (state === "skipped" && this.managedKernelLive) {
+      const aggregated = this.aggregateReadinessFromAgents(agents);
+      if (aggregated === "ready" || aggregated === "partial_ready") kernelState = aggregated;
     } else if (
       (state === "bootstrap_failed" || state === "degraded")
       && !this.bootstrapInFlight
@@ -181,7 +200,7 @@ export class KernelBootTracker {
     this.cancelTimer();
   }
 
-  private onBootstrapComplete(result: BootstrapResult): void {
+  private onBootstrapComplete(result: Pick<BootstrapResult, "errors">): void {
     this.bootstrapInFlight = false;
     if (result.errors && result.errors.length > 0) {
       this.cancelTimer();
@@ -219,7 +238,8 @@ export class KernelBootTracker {
       // as booting so the operator sees progress, not a false ready.
       return "booting";
     }
-    const readyCount = agents.filter((a) => a.startupStatus === "ready").length;
+    // A seat whose newest session is gone keeps its last startup status; it is not ready.
+    const readyCount = agents.filter((a) => a.startupStatus === "ready" && !a.down).length;
     if (readyCount === agents.length) return "ready";
     if (readyCount === 0) return "booting";
     return "partial_ready";
@@ -239,6 +259,7 @@ export class KernelBootTracker {
             sessionName: s.sessionName,
             runtime: runtimeByNode.get(s.nodeId) ?? "unknown",
             startupStatus: s.startupStatus,
+            ...(isDownSession(s) ? { down: true } : {}),
           });
         }
       }
@@ -274,7 +295,8 @@ export class KernelBootTracker {
       for (const rig of this.deps.rigRepo.findUnarchivedRigsByName("kernel")) {
         const latest = this.latestSessionByNode(rig.id);
         for (const node of this.deps.rigRepo.getRig(rig.id)?.nodes ?? []) {
-          if (latest.get(node.id)?.startupStatus !== "ready") return false;
+          const session = latest.get(node.id);
+          if (session?.startupStatus !== "ready" || isDownSession(session)) return false;
           readySeats.add(node.logicalId);
         }
       }
