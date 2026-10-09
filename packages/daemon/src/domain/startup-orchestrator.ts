@@ -298,6 +298,12 @@ export class StartupOrchestrator {
         let attemptedFreshFallback = false;
 
         while (true) {
+          if (input.adapter.runtime === "claude-code") {
+            // Before the launch: Claude's SessionStart hook can land before launchHarness returns.
+            try {
+              this.sessionRegistry.recordResumeLaunch(input.sessionId, launchResumeToken ?? null);
+            } catch { /* best-effort: without it a rotation stays unproved, as before */ }
+          }
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             resumeToken: launchResumeToken,
@@ -310,7 +316,7 @@ export class StartupOrchestrator {
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
-                this.sessionRegistry.recordLaunchResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
+                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
               } catch { /* best-effort */ }
             }
             break;

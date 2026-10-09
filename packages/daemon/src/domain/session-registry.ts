@@ -384,10 +384,11 @@ export class SessionRegistry {
     evidence: { source: string | null; currentGeneration: boolean },
   ): boolean {
     return this.db.transaction(() => {
-      const before = this.db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(sessionId) as
-        { resume_token: string | null } | undefined;
+      const before = this.db.prepare("SELECT resume_token, resume_launch_token FROM sessions WHERE id = ?").get(sessionId) as
+        { resume_token: string | null; resume_launch_token: string | null } | undefined;
       if (!this.updateResumeToken(sessionId, type, token, "hook")) return false;
-      const previous = before?.resume_token?.trim() || null;
+      // A hook that lands before any launch path recorded the token still knows what was launched.
+      const previous = before?.resume_token?.trim() || before?.resume_launch_token?.trim() || null;
       if (previous === token.trim()) return true;
       const source = evidence.currentGeneration ? evidence.source : null;
       this.db.prepare("UPDATE sessions SET resume_source = ?, resume_rotated_from = ? WHERE id = ?")
@@ -396,21 +397,12 @@ export class SessionRegistry {
     })();
   }
 
-  /** Record the token OpenRig launched this row with. A current-generation
-   *  `source: "resume"` hook can land before this write, while the row is still
-   *  empty, so it had no previous token to name; the launch is that token.
-   *  Fills only that gap and never displaces the hook's token. */
-  recordLaunchResumeToken(sessionId: string, type: string, token: string): boolean {
-    const normalized = token.trim();
-    if (!normalized) return false;
-    return this.db.transaction(() => {
-      if (this.updateResumeToken(sessionId, type, normalized, "scrape")) return true;
-      this.db.prepare(
-        "UPDATE sessions SET resume_rotated_from = ? WHERE id = ? AND resume_type = ? AND resume_provenance = 'hook' " +
-        "AND resume_source = 'resume' AND resume_rotated_from IS NULL AND resume_token <> ?",
-      ).run(normalized, sessionId, type, normalized);
-      return false;
-    })();
+  /** Record the token this row's Claude process is about to be launched to resume (null for a
+   *  fresh launch). It is what argv will carry, so it is recorded before the launch, where no
+   *  SessionStart hook can precede it. It certifies nothing: it only lets a `source: "resume"` hook
+   *  that finds no stored token name the token it replaced. */
+  recordResumeLaunch(sessionId: string, token: string | null): void {
+    this.db.prepare("UPDATE sessions SET resume_launch_token = ? WHERE id = ?").run(token?.trim() || null, sessionId);
   }
 
   /** True when this row's hook-recorded resume rotation started from `token`. */

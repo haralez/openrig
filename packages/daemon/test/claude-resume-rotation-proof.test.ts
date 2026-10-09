@@ -108,50 +108,70 @@ describe("recording how a Claude session began", () => {
 });
 
 describe("a resume hook that lands before the launch records its token", () => {
-  // Claude's SessionStart can fire while the launch is still settling, before startup-orchestrator
-  // writes T1. The row is empty then, so the hook has no previous token to name; the launch does.
-  it("the launch write names the token the resume replaced", () => {
+  // Claude's SessionStart can fire while the launch is still settling, before any launch path writes
+  // T1 (or, on an attention or legacy path, without one ever writing it). The launch token, recorded
+  // before the launch, is what the hook names then.
+  const early = () => {
     const s = seat({ launched: false });
+    s.registry.recordResumeLaunch(s.session.id, T1);
+    return s;
+  };
+
+  it("names the launch token the resume replaced", () => {
+    const s = early();
     s.hook(T2, "resume");
-    expect(s.row()).toMatchObject({ resume_token: T2, resume_source: "resume", resume_rotated_from: null });
-    expect(s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1)).toBe(false);
     expect(s.row()).toEqual({ resume_token: T2, resume_provenance: "hook", resume_source: "resume", resume_rotated_from: T1 });
     expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(true);
   });
 
-  it.each(["clear", "startup", "compact", null])("an early hook with source %s gets no launch token", (source) => {
-    const s = seat({ launched: false });
+  it("a later launch-path write of T1 loses to the hook and leaves the record", () => {
+    const s = early();
+    s.hook(T2, "resume");
+    s.registry.updateResumeToken(s.session.id, "claude_id", T1, "scrape");
+    s.registry.recordResumeAttempt(s.session.id, "claude_id", T1);
+    expect(claudeRotatedFromToken(s.row())).toBe(T1);
+  });
+
+  it.each(["clear", "startup", "compact", null])("an early hook with source %s names nothing", (source) => {
+    const s = early();
     s.hook(T2, source);
-    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1);
     expect(s.row()).toMatchObject({ resume_token: T2, resume_rotated_from: null });
     expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(false);
   });
 
-  it("an early hook for a stale generation gets no launch token", () => {
-    const s = seat({ launched: false });
+  it("an early hook for a stale generation names nothing", () => {
+    const s = early();
     s.hook(T2, "resume", false);
-    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1);
     expect(claudeRotatedFromToken(s.row())).toBeNull();
   });
 
   it("an early resume hook that kept the id needs no rotation", () => {
-    const s = seat({ launched: false });
+    const s = early();
     s.hook(T1, "resume");
-    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1);
-    expect(s.row()).toMatchObject({ resume_token: T1, resume_rotated_from: null });
+    expect(s.row()).toMatchObject({ resume_token: T1, resume_source: null, resume_rotated_from: null });
   });
 
-  it("never overwrites a rotation the hook already recorded", () => {
+  it("a stored token outranks the launch token as what the resume replaced", () => {
     const s = seat();
+    s.registry.recordResumeLaunch(s.session.id, T3);
     s.hook(T2, "resume");
-    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T3);
     expect(s.row()).toMatchObject({ resume_token: T2, resume_rotated_from: T1 });
   });
 
-  it("with no hook yet it is the ordinary launch write", () => {
+  it("a fresh launch records no launch token", () => {
     const s = seat({ launched: false });
-    expect(s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1)).toBe(true);
-    expect(s.row()).toMatchObject({ resume_token: T1, resume_provenance: "scrape", resume_rotated_from: null });
+    s.registry.recordResumeLaunch(s.session.id, T1);
+    s.registry.recordResumeLaunch(s.session.id, null);
+    s.hook(T2, "resume");
+    expect(claudeRotatedFromToken(s.row())).toBeNull();
+  });
+
+  it("one hop: a /clear and a later in-process resume name the cleared conversation, not the launch", () => {
+    const s = early();
+    s.hook(T2, "clear");
+    s.hook(T3, "resume");
+    expect(claudeRotatedFromToken(s.row())).toBe(T2);
+    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(false);
   });
 });
 

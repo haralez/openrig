@@ -1032,6 +1032,13 @@ export class RestoreOrchestrator {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.` };
       } else {
+        const launchedSessionId = launchResult?.session.id;
+        if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
+          // Before the resume: Claude's SessionStart hook can land before attemptResume returns.
+          try {
+            this.sessionRegistry.recordResumeLaunch(launchedSessionId, resumeToken);
+          } catch { /* best-effort: without it a rotation stays unproved, as before */ }
+        }
         const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort, warnings);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
@@ -1376,6 +1383,7 @@ export class RestoreOrchestrator {
           // Claude continued the resumed conversation under a new id (its hook said so).
           || this.sessionRegistry.claudeResumeRotatedFrom(sessionId, resumeToken)
         : current.resume_token === resumeToken
+          || (node.runtime === "claude-code" && this.sessionRegistry.claudeResumeRotatedFrom(sessionId, resumeToken))
           || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, node.runtime === "codex" ? "codex_id" : "claude_id", resumeToken, "scrape")));
       if (!retained) {
         markManagedResumeAttention();
