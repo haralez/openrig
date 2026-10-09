@@ -23,7 +23,7 @@ import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { observeClaudeResumeLaunch, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
@@ -174,11 +174,17 @@ export class StartupOrchestrator {
 
   private readFile: (path: string) => string;
 
-  /** The process this Claude resume launch started, as the launch itself observes it (#1077). A
-   *  rotation its hook later reports counts only for this process; unobserved, none counts. */
-  private async recordClaudeResumeLaunch(sessionId: string, target: string | null | undefined, token: string): Promise<void> {
-    if (!target) return;
+  /** The process this Claude resume launch started, as the launch itself observes it (#1077): the one
+   *  the adapter's readiness check pinned first, else one observed now. A rotation its hook later
+   *  reports counts only for this process; unobserved, none counts. */
+  private async recordClaudeResumeLaunch(sessionId: string, target: string | null | undefined, token: string,
+    pinned: ClaudeLaunchedProcess | undefined): Promise<void> {
     try {
+      if (pinned) {
+        this.sessionRegistry.recordResumeLaunchProcess(sessionId, token, pinned);
+        return;
+      }
+      if (!target) return;
       const launched = await observeClaudeResumeLaunch({ target, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, token });
       if (launched) this.sessionRegistry.recordResumeLaunchProcess(sessionId, token, launched);
     } catch { /* best-effort: without it a rotation stays unproved, as before */ }
@@ -327,7 +333,7 @@ export class StartupOrchestrator {
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
             if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
-              await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, launchResumeToken.trim());
+              await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, launchResumeToken.trim(), launchResult.launchedProcess);
             }
             const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
             if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
@@ -377,7 +383,7 @@ export class StartupOrchestrator {
             }
             // The launch is retained for reconciliation; record its process as it does when ready.
             if (input.adapter.runtime === "claude-code" && normalizedResumeToken) {
-              await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, normalizedResumeToken);
+              await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, normalizedResumeToken, launchResult.launchedProcess);
             }
             errors.push(`Harness launch requires attention: ${launchResult.error}`);
             // isRestore selects context, not native continuity: pod-aware exact

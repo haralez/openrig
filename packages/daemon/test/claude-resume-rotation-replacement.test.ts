@@ -56,6 +56,9 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     // dev-review's reproduction against 21c55946: the replacement comes before the late hook, so
     // that hook is the replacement's own; only the launch's own observation tells them apart.
     ["late-hook", "replaced-before-hook"],
+    // dev-review's reproduction against e130f584: the adapter's readiness check pins 102, then sees
+    // 202 instead and refuses; the launch's record must stay 102, not a later read of 202.
+    ["late-hook", "replaced-during-readiness"],
   ] as const)("%s, then %s process", async (hookTiming, after) => {
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -117,11 +120,13 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     } as unknown as TmuxAdapter;
     const startedAt = "Thu Oct  1 05:53:16 2026";
     // The launch path records its own process (102) once the launch returns. The adapter's readiness
-    // check cannot see it in time, so the seat ends in attention and recovers only through
-    // clear-attention's strict restore reconcile.
+    // check cannot see it in time (or, replaced-during-readiness, sees 102 once and then 202), so the
+    // seat ends in attention and recovers only through clear-attention's strict restore reconcile.
     let phase: "launched" | "after" = "launched";
-    const replaced = () => (after === "replaced" && phase === "after") || after === "replaced-before-hook" && hookTiming === "late-hook" && hooked;
     let hooked = false;
+    let readinessSamples = 0;
+    const replaced = () => (after === "replaced" && phase === "after") || (after === "replaced-before-hook" && hooked)
+      || (after === "replaced-during-readiness" && readinessSamples > 1);
     const claude = (pid: number, ppid: number, conversation: string, began: string) =>
       ({ pid, ppid, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${conversation} --name ${name}`, startedAt: began });
     const paneRows = () => [
@@ -138,7 +143,12 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
     expect(down.errors).toEqual([]);
     const managed = { prepare: async () => ({ command: (args: readonly string[], env: Record<string, string> = {}) => [...Object.entries(env).map(([k, v]) => `${k}=${v}`), "claude", ...args].join(" "), assertCurrent: () => {}, configDir: "/fixture", executable: "/opt/claude.exe" }) } as unknown as ClaudeManagedLaunch;
-    const adapter = new ClaudeCodeAdapter({ tmux, listProcesses: async () => [], sleep: async () => {}, claudeManagedLaunch: managed,
+    const readiness = async () => {
+      if (after !== "replaced-during-readiness") return [];
+      readinessSamples += 1;
+      return paneRows();
+    };
+    const adapter = new ClaudeCodeAdapter({ tmux, listProcesses: readiness, sleep: async () => {}, claudeManagedLaunch: managed,
       fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} } });
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
     const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
