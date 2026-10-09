@@ -248,7 +248,8 @@ Examples:
           console.error(`Kernel restore did not bring the kernel up: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);
           console.error("Recover it with: rig up kernel --existing");
           process.exitCode = 1;
-        } else {
+        } else if (!opts.json) {
+          // Not a failure: --json carries it as kernelRestore.
           console.error(`Kernel is still restoring and not ready yet (state=${kernelResult.kernelState ?? "unknown"}). Check it with: rig status`);
         }
         if (!opts.json) console.log("Continuing with your other rigs.");

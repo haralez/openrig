@@ -100,6 +100,9 @@ describe("rig start while daemon start restores an existing kernel", () => {
     expect(JSON.parse(result.logs.split("\n").at(-1)!)).toMatchObject({
       status: "started", kernelRestore: { state: "restoring", kernelState: "booting" },
     });
+    // A command that succeeded leaves stdout to the JSON and writes nothing error-like.
+    expect(result.errors).toBe("");
+    expect(result.exitCode).toBe(0);
   });
 
   it("a first boot that fails still stops before rig restore", async () => {
