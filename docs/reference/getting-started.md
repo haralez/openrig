@@ -189,10 +189,20 @@ reboot. It does not detect a reboot as such. It uses the same restore as
 until the seats are ready. A kernel stopped with `rig down kernel`, including
 one whose seats were already detached, stays down on later starts. So do a kernel
 with only some seats stopped and seats you unclaimed. Start one again with
-`rig up kernel --existing`. While that automatic restore runs, `rig start`
-continues to your other rigs and says the kernel is still restoring, and a
-`rig up kernel --existing` with no other options waits for it and reports its
-outcome. Do not restart or recreate an
+`rig up kernel --existing`.
+
+While that automatic restore runs, `rig start` continues to your other rigs and
+says the kernel is still restoring (`kernelRestore.state: "restoring"` with
+`--json`). Its exit status 0 then does not mean the kernel is ready; check
+`rig status`. When the restore has returned without a ready kernel, `rig start`
+still goes on to your other rigs but exits 1 (`kernelRestore.state: "failed"`),
+so `rig start && next` does not run `next`. A `rig down kernel` made during the
+restore waits for it to return and then stops the kernel, which stays down on
+later starts. A `rig up kernel --existing` with no other options, made during
+the restore or after it restored every seat, reports that restore's outcome
+instead of starting another; one with other options is not merged into it.
+
+Do not restart or recreate an
 existing kernel merely to open its view. The startup TUI (`rig`) offers its own
 kernel setup and individual-seat recovery; it does not automatically boot agents
 when it starts the daemon.

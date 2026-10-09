@@ -156,6 +156,10 @@ Examples:
   rig start --last                  Headless: restore everything that was running
   rig start --all                   Headless: restore all rigs with restore-usable snapshots
   rig start --rigs prod-rig dev-rig Headless: restore only the named rigs
+
+When the daemon is restoring a kernel a reboot left down, rig start goes on to
+your other rigs. Exit 0 then does not mean the kernel is ready (check rig
+status); a restore that returned without a ready kernel exits 1.
 `);
   const getDepsF = (): StartDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };

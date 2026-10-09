@@ -9,7 +9,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
-import { chooseRestoreSnapshot, runExistingRigRestore, seatsStillTarget, unattendedRestoreInProgress, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
+import { chooseRestoreSnapshot, joinAutomaticRestore, JOINED_AUTOMATIC_RESTORE_WARNING, runExistingRigRestore, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
 import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
@@ -93,24 +93,18 @@ function getDeps(c: { get: (key: string) => unknown }) {
  * The response payload echoes `snapshotKind` so the operator/CLI can surface
  * which snapshot was used.
  *
- * Shared helper used by both /api/up (rig_name) and /api/rigs/:rigId/up (Explorer).
+ * Used by /api/up (rig_name). The Explorer's /api/rigs/:rigId/up keeps its own request and response
+ * contract and shares joinAutomaticRestore.
  */
 async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }, freshLogicalIds?: string[], plan?: boolean, nonInterruptive?: boolean) {
   const { snapshotRepo } = deps;
-  // Daemon start is already restoring this rig (a kernel a reboot left down). A request for the same
-  // restore waits for that one and reports its outcome: no second launch and no snapshot of its own.
-  // One that asks for something else (--fresh seats, a non-interruptive choice) is not merged, and
-  // neither is one whose target has changed since that restore began: every seat's newest session
-  // must still name the resume target the running restore is restoring (an operator token
-  // correction or another occupant does not). Otherwise the request takes the ordinary path and
-  // its refusals.
+  // Daemon start restores a kernel a reboot left down. A request for that same restore, made while it
+  // runs or just after, gets its outcome instead of a second launch or a refusal; see
+  // joinAutomaticRestore for when the seats still count as that restore's. A request for something
+  // else (--fresh seats, a non-interruptive choice, a plan) takes the ordinary path.
   if (!plan && !freshLogicalIds?.length && nonInterruptive === undefined) {
-    const running = unattendedRestoreInProgress(deps, rigId);
-    const runningSnapshot = running?.snapshotId ? snapshotRepo.getSnapshot(running.snapshotId) : null;
-    const rig = runningSnapshot ? deps.rigRepo.getRig(rigId) : null;
-    if (running && runningSnapshot && rig && seatsStillTarget(snapshotRepo.db, rig, runningSnapshot)) {
-      return renderExistingRestore(rigId, rigName, deps, c, await running.outcome, true);
-    }
+    const joined = await joinAutomaticRestore(deps, rigId);
+    if (joined) return renderExistingRestore(rigId, rigName, deps, c, joined, true);
   }
   const choice = chooseRestoreSnapshot(deps, rigId);
   if (!choice.ok) return c.json(choice.body, choice.status);
@@ -141,7 +135,7 @@ async function renderExistingRestore(
 ) {
   if (!outcome.ok) return c.json(outcome.choice.body, outcome.choice.status);
   const { snapshot, capturedCurrentState, result, staleSnapshot } = outcome;
-  const joinedWarning = joined ? ["Daemon start was already restoring this rig; this is that restore's outcome, and no second restore was started."] : [];
+  const joinedWarning = joined ? [JOINED_AUTOMATIC_RESTORE_WARNING] : [];
   if (!result.ok && result.code === "restore_unavailable") {
     return c.json({ error: result.message }, 500);
   }

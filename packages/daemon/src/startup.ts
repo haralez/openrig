@@ -1066,7 +1066,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // A kernel a reboot left down comes back the way `rig up kernel --existing` brings it back.
       // Synchronous, so the restore is registered before any request can ask for the same one.
       restoreLostKernel: (rigId) =>
-        restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters }, rigId, (p) => fs.existsSync(p)),
+        restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters, tmuxAdapter }, rigId, (p) => fs.existsSync(p)),
     });
     try {
       // eslint-disable-next-line no-console

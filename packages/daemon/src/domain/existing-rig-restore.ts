@@ -65,7 +65,10 @@ export function chooseRestoreSnapshot(deps: ExistingRigRestoreDeps, rigId: strin
 export async function runExistingRigRestore(
   deps: ExistingRigRestoreDeps,
   choice: Extract<RestoreSnapshotChoice, { ok: true }>,
-  opts: { freshLogicalIds?: string[]; nonInterruptive?: boolean; exists: (path: string) => boolean; onSnapshot?: (snapshotId: string) => void },
+  opts: {
+    freshLogicalIds?: string[]; nonInterruptive?: boolean; exists: (path: string) => boolean;
+    onSnapshot?: (snapshotId: string) => void; onSessionLaunched?: (nodeId: string, sessionId: string) => void;
+  },
 ) {
   let { snapshot, snapshotSelection } = choice;
   let capturedCurrentState = false;
@@ -90,68 +93,146 @@ export async function runExistingRigRestore(
     freshLogicalIds: opts.freshLogicalIds,
     nonInterruptive: opts.nonInterruptive,
     snapshotSelection,
+    onSessionLaunched: opts.onSessionLaunched,
   });
   return { snapshot, capturedCurrentState, result };
 }
+
+/** Said in a response that reports daemon start's restore instead of running one of its own. */
+export const JOINED_AUTOMATIC_RESTORE_WARNING =
+  "Daemon start was already restoring this rig; this is that restore's outcome, and no second restore was started.";
 
 export type ExistingRigRestoreOutcome =
   | { ok: false; choice: Extract<RestoreSnapshotChoice, { ok: false }> }
   | ({ ok: true; staleSnapshot: boolean } & Awaited<ReturnType<typeof runExistingRigRestore>>);
 
-// The unattended restore running for each rig, per database: an equivalent `rig up <rig> --existing`
-// that arrives meanwhile waits for it instead of starting a second one.
+// Daemon start's unattended restore of each rig, per database: the latest attempt, kept after it
+// returns. Requests that meet it coordinate with it (`joinAutomaticRestore`, `settleAutomaticRestore`)
+// instead of colliding with its seat leases.
 // `snapshotId` is the snapshot that restore runs from, known as soon as it has chosen or captured it.
-type UnattendedRestore = { outcome: Promise<ExistingRigRestoreOutcome>; snapshotId: string | null };
-const unattendedRestores = new WeakMap<object, Map<string, UnattendedRestore>>();
+// `launched` holds the session each seat's launch registered, recorded as its row is committed.
+type AutomaticRestore = {
+  outcome: Promise<ExistingRigRestoreOutcome>;
+  settled: ExistingRigRestoreOutcome | null;
+  snapshotId: string | null;
+  launched: Map<string, string>;
+  hasSession?: (sessionName: string) => Promise<boolean>;
+};
+const automaticRestores = new WeakMap<object, Map<string, AutomaticRestore>>();
 
-/** The unattended restore now running for this rig, if any. */
-export function unattendedRestoreInProgress(deps: ExistingRigRestoreDeps, rigId: string): UnattendedRestore | null {
-  return unattendedRestores.get(deps.snapshotRepo.db)?.get(rigId) ?? null;
+function automaticRestore(db: Database.Database, rigId: string): AutomaticRestore | null {
+  return automaticRestores.get(db)?.get(rigId) ?? null;
 }
 
-/** Whether every seat of `rig` still names the resume target `snapshot` restores it to: each seat's
- *  newest live session carries the same resume type and token, or no token yet (a restore's own new
- *  row before its launch writes one). The session rows themselves may differ, since a running
- *  restore registers its own. A different token (an operator correction, a rotation), an occupant
- *  where the snapshot had none, or an unresolved snapshot seat is not the same target. */
-export function seatsStillTarget(db: Database.Database, rig: Rig, snapshot: Snapshot): boolean {
+/** Wait for daemon start's restore of this rig, if one is running, to return. A stop then runs on
+ *  what that restore left, under fresh leases, instead of failing on the seats it rebound. */
+export async function settleAutomaticRestore(db: Database.Database, rigId: string): Promise<void> {
+  const attempt = automaticRestore(db, rigId);
+  if (attempt && !attempt.settled) await attempt.outcome.catch(() => undefined);
+}
+
+type SeatRow = { id: string; resumeType: string | null; resumeToken: string | null; provenance: string | null };
+
+/** Whether every seat still holds what the attempt left or is about to restore: the session the
+ *  attempt itself launched for it; for a seat it has not launched (yet), the session it is
+ *  restoring, still naming the snapshot's resume target; or no live session at all. The attempt's
+ *  own session may carry no token yet, or one its own launch reported (a resume that continued
+ *  under a new id); an operator's correction to another token is a different target. Any other
+ *  newer session is another occupant. */
+function seatsHeldByAttempt(db: Database.Database, rig: Rig, snapshot: Snapshot, attempt: AutomaticRestore): boolean {
   const newest = db.prepare(
-    `SELECT resume_type AS resumeType, resume_token AS resumeToken FROM sessions
+    `SELECT id, resume_type AS resumeType, resume_token AS resumeToken, resume_provenance AS provenance FROM sessions
       WHERE node_id = ? AND status NOT IN ('superseded', 'exited')
       ORDER BY created_at DESC, id DESC LIMIT 1`,
   );
   return rig.nodes.every((node) => {
+    const row = newest.get(node.id) as SeatRow | undefined;
+    // Between standing a seat's old session down and registering its own, the attempt leaves none.
+    if (!row) return true;
     const target = resolveActiveSnapshotSession(snapshot.data, node.id);
-    const row = newest.get(node.id) as { resumeType: string | null; resumeToken: string | null } | undefined;
-    if (target.kind === "none") return !row?.resumeToken;
-    if (target.kind !== "resolved") return false;
-    if (!row?.resumeToken) return true;
-    return row.resumeType === (target.session.resumeType ?? null) && row.resumeToken === (target.session.resumeToken ?? null);
+    const sameTarget = target.kind === "resolved" && !!row.resumeToken
+      && row.resumeType === (target.session.resumeType ?? null) && row.resumeToken === (target.session.resumeToken ?? null);
+    if (attempt.launched.get(node.id) === row.id) {
+      return !row.resumeToken || sameTarget || row.provenance !== "operator";
+    }
+    if (target.kind === "none") return !row.resumeToken;
+    return sameTarget;
   });
+}
+
+/** Whether the finished attempt restored every seat and each still runs the session it launched. */
+async function attemptStillRunning(db: Database.Database, rig: Rig, attempt: AutomaticRestore): Promise<boolean> {
+  const done = attempt.settled;
+  if (!done?.ok || !done.result.ok || done.result.result.rigResult !== "fully_restored") return false;
+  for (const node of rig.nodes) {
+    const sessionId = attempt.launched.get(node.id);
+    const row = sessionId ? db.prepare(
+      `SELECT s.status, s.session_name AS sessionName, b.tmux_session AS bound FROM sessions s
+        LEFT JOIN bindings b ON b.node_id = s.node_id WHERE s.id = ?`,
+    ).get(sessionId) as { status: string; sessionName: string; bound: string | null } | undefined : undefined;
+    if (!row || row.status !== "running" || row.bound !== row.sessionName) return false;
+    if (attempt.hasSession && !(await attempt.hasSession(row.sessionName))) return false;
+  }
+  return true;
+}
+
+/** The outcome of daemon start's restore of this rig, for a request that asks for the same restore
+ *  (no --fresh seats, no non-interruptive choice, not a plan), or null when the request must take
+ *  the ordinary path:
+ *  - while that restore runs, the request waits for it, then gets its outcome if every seat still
+ *    holds what it left (`seatsHeldByAttempt`);
+ *  - once it has returned, the request gets its outcome only if it restored every seat and each
+ *    still runs the session it launched, checked against the terminal.
+ *  Either way no second launch and no snapshot of its own. */
+export async function joinAutomaticRestore(
+  deps: Pick<ExistingRigRestoreDeps, "rigRepo" | "snapshotRepo">,
+  rigId: string,
+): Promise<ExistingRigRestoreOutcome | null> {
+  const db = deps.snapshotRepo.db;
+  const attempt = automaticRestore(db, rigId);
+  const snapshot = attempt?.snapshotId ? deps.snapshotRepo.getSnapshot(attempt.snapshotId) : null;
+  const held = () => {
+    const rig = deps.rigRepo.getRig(rigId);
+    return rig && snapshot && attempt && seatsHeldByAttempt(db, rig, snapshot, attempt) ? rig : null;
+  };
+  if (!attempt || !snapshot || !held()) return null;
+  if (attempt.settled) {
+    const rig = held()!;
+    return await attemptStillRunning(db, rig, attempt) && held() ? attempt.settled : null;
+  }
+  const outcome = await attempt.outcome;
+  return held() ? outcome : null;
 }
 
 /** Restore an existing rig with no operator present (daemon start bringing back a lost kernel) and
  *  reduce the outcome to the errors that kept it from restoring. A partial restore is not a
  *  failure: the seats' own status then decides ready or partial_ready. */
 export function restoreExistingRigUnattended(
-  deps: ExistingRigRestoreDeps,
+  deps: ExistingRigRestoreDeps & { tmuxAdapter?: { hasSession(name: string): Promise<boolean> } },
   rigId: string,
   exists: (path: string) => boolean,
 ): Promise<{ errors: string[] }> {
-  const entry: UnattendedRestore = { outcome: Promise.resolve(null as never), snapshotId: null };
+  const tmux = deps.tmuxAdapter;
+  const entry: AutomaticRestore = {
+    outcome: Promise.resolve(null as never), settled: null, snapshotId: null, launched: new Map(),
+    ...(tmux ? { hasSession: (name: string) => tmux.hasSession(name) } : {}),
+  };
   const outcome = (async (): Promise<ExistingRigRestoreOutcome> => {
     const choice = chooseRestoreSnapshot(deps, rigId);
     if (!choice.ok) return { ok: false, choice };
-    const run = runExistingRigRestore(deps, choice, { exists, onSnapshot: (id) => { entry.snapshotId = id; } });
+    const run = runExistingRigRestore(deps, choice, {
+      exists,
+      onSnapshot: (id) => { entry.snapshotId = id; },
+      onSessionLaunched: (nodeId, sessionId) => { entry.launched.set(nodeId, sessionId); },
+    });
     return { ok: true, staleSnapshot: choice.staleSnapshot, ...await run };
   })();
   entry.outcome = outcome;
   const db = deps.snapshotRepo.db;
-  const running = unattendedRestores.get(db) ?? new Map<string, UnattendedRestore>();
-  unattendedRestores.set(db, running);
-  running.set(rigId, entry);
-  const settle = () => { if (running.get(rigId) === entry) running.delete(rigId); };
-  outcome.then(settle, settle);
+  const attempts = automaticRestores.get(db) ?? new Map<string, AutomaticRestore>();
+  automaticRestores.set(db, attempts);
+  attempts.set(rigId, entry);
+  outcome.then((done) => { entry.settled = done; }, () => { attempts.delete(rigId); });
   return outcome.then((done) => {
     if (!done.ok) return { errors: [done.choice.body.error] };
     const { result } = done;

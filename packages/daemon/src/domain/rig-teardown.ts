@@ -11,6 +11,7 @@ import nodePath from "node:path";
 import { removeManagedBlocksFromFile, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE } from "./managed-blocks.js";
 import { stopTranscriptRotation } from "./transcript-rotation.js";
 import { findOtherSessionOwner } from "./session-owner.js";
+import { settleAutomaticRestore } from "./existing-rig-restore.js";
 
 export interface TeardownResult {
   rigId: string;
@@ -77,6 +78,10 @@ export class RigTeardownOrchestrator {
 
     const guard = this.deps.tmuxAdapter.deliveryGuard;
     const ids = rig.nodes.map(node => node.id);
+    // Daemon start may be restoring this rig (a kernel a reboot left down). A stop made meanwhile
+    // waits, holding no lease, for that restore to return and then stops what it left, so the stop
+    // wins either way; taking the leases first would bind to seats that restore then replaces.
+    if (!guard || !ids.some(id => guard.ownsLifecycle(id))) await settleAutomaticRestore(this.db, rigId);
     if (guard && ids.some(id => !guard.ownsLifecycle(id))) return guard.lifecycle(ids, () => this.teardown(rigId, opts));
     const result: TeardownResult = {
       rigId, sessionsKilled: 0, snapshotId: null,
