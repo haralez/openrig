@@ -166,6 +166,28 @@ describe("A3 Claude shell sampling", () => {
     expect(f.verdict()?.verdict).toBe("mismatch");
   });
 
+  // #1077 — launched as `--resume saved-token`, continued as `rotated-token`; the SessionStart hook
+  // recorded the new id with how it began. Only a current-generation resume proves the seat.
+  it.each([
+    ["resume", "saved-token", "verified"],
+    ["clear", null, "mismatch"],
+    ["startup", null, "mismatch"],
+    ["resume", "other-token", "mismatch"],
+  ] as const)("a rotated stored token with source %s (replaced %s) reads %s", async (source, rotatedFrom, expected) => {
+    const f = fixture();
+    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'hook', resume_source = ?, resume_rotated_from = ?")
+      .run(source, rotatedFrom);
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe(expected);
+  });
+
+  it("does not accept a recorded resume once the stored token is an operator's", async () => {
+    const f = fixture();
+    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'operator', resume_source = 'resume', resume_rotated_from = 'saved-token'").run();
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("mismatch");
+  });
+
   it("leaves Codex sampling and command count unchanged", async () => {
     const f = fixture("codex", "codex");
     await f.rec.reconcileAll();

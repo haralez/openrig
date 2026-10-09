@@ -4,7 +4,7 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SessionRegistry, claudeRotatedFromToken } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -17,6 +17,7 @@ import { observeClaudeDelivery, verifyClaudePaneProcess } from "../src/domain/na
 
 const original = "00000000-0000-4000-8000-000000000596";
 const rotated = "00000000-0000-4000-8000-000000000597";
+const third = "00000000-0000-4000-8000-000000000598";
 const name = "test-c@rotation";
 const screen = "─────────\n❯\u00a0\n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n";
 
@@ -24,7 +25,12 @@ type Mode = "unchanged" | "rotation" | "duplicate-hook" | "delayed-hook" | "shim
   | "unknown" | "foreign-runtime" | "changed-process" | "changed-occupant"
   | "changed-pane" | "changed-after-paste" | "stale-hook-foreign-runtime"
   | "N1-settings-before" | "settings-after" | "plain-wrong-token" | "lone-wrong-shim"
-  | "delayed-rotated-hook" | "probe-refresh";
+  | "delayed-rotated-hook" | "probe-refresh"
+  | SourcedMode;
+// #1077 — the hook also reports SessionStart's source and the seat's occupant generation.
+const sourcedModes = ["resume-rotation", "resume-then-clear", "clear-sourced", "startup-sourced",
+  "compact-sourced", "resume-stale-generation", "resume-no-source"] as const;
+type SourcedMode = typeof sourcedModes[number];
 const tokenOnlyModes = ["N1-settings-before", "settings-after", "plain-wrong-token", "lone-wrong-shim"] as const;
 
 // The hook, SQLite registry and transport are real. Only process/tmux observations
@@ -49,11 +55,12 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
       await next();
     });
     app.route("/api/activity", activityRoutes);
-    const hook = async (token: string, occurredAt?: string) => {
+    const generation = registry.currentOccupantTenure(node.id)!.generationUuid;
+    const hook = async (token: string, occurredAt?: string, evidence: { source?: string; generation?: string } = {}) => {
       const response = await app.request("/api/activity/hooks", {
         method: "POST",
         headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
-        body: JSON.stringify({ eventFamily: "session_identity", sessionName: name, runtime: "claude-code", sessionId: token, occurredAt }),
+        body: JSON.stringify({ eventFamily: "session_identity", sessionName: name, runtime: "claude-code", sessionId: token, occurredAt, ...evidence }),
       });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ tokenPersisted: true });
@@ -62,7 +69,13 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     // These mismatched fixtures never rotate: even an initial hook is not proof
     // of a later conversation transition. Their ordinary delivery is unverified.
     const tokenOnly = tokenOnlyModes.some(value => value === mode) || mode === "probe-refresh";
-    if (mode !== "unchanged" && !tokenOnly) {
+    const sourced = sourcedModes.some(value => value === mode);
+    if (sourced) {
+      const source = mode === "clear-sourced" ? "clear" : mode === "startup-sourced" ? "startup"
+        : mode === "compact-sourced" ? "compact" : mode === "resume-no-source" ? undefined : "resume";
+      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation });
+      if (mode === "resume-then-clear") await hook(third, undefined, { source: "clear", generation });
+    } else if (mode !== "unchanged" && !tokenOnly) {
       await hook(rotated, mode === "delayed-rotated-hook" ? "2000-01-01T00:00:00Z" : undefined);
     }
     if (mode === "duplicate-hook") await hook(rotated);
@@ -136,8 +149,11 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     expect(send).toHaveBeenCalledTimes(1);
     const result = await send.mock.results[0]!.value;
     const stored = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(session.id) as { resume_token: string };
+    const rotation = db.prepare("SELECT resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE id = ?")
+      .get(session.id) as Parameters<typeof claudeRotatedFromToken>[0];
     // Independent of delivery effects: strict identity stays unproved for a mismatch.
-    const input = { target: "%1", tmux, listProcesses: async () => rows, expectedToken: stored.resume_token };
+    const input = { target: "%1", tmux, listProcesses: async () => rows, expectedToken: stored.resume_token,
+      rotatedFromToken: claudeRotatedFromToken(rotation) };
     const observed = await observeClaudeDelivery(input);
     const strict = await verifyClaudePaneProcess(input);
     return { result, calls, stored, observed, strict };
@@ -194,4 +210,26 @@ describe("ordinary Claude delivery after an in-process conversation change (#596
     expect(result).toMatchObject({ ok: false, sent: true, reason: "target_runtime_conflict" });
     expect(calls).toEqual(["text"]);
   });
+});
+
+describe("a resumed conversation that changed its id, with the hook's evidence (#1077)", () => {
+  it("resume-rotation: the hook said resume for this generation, so send verifies the seat", async () => {
+    const { result, calls, stored, observed, strict } = await sendAfterHook("resume-rotation");
+    expect(stored.resume_token).toBe(rotated);
+    expect(observed.state).toBe("verified");
+    expect(strict).not.toBeNull();
+    expect(result.ok).toBe(true);
+    expect(result.warning ?? "").not.toContain("without verified native identity");
+    expect(calls).toEqual(["text", "enter"]);
+  });
+
+  it.each(["clear-sourced", "resume-then-clear", "startup-sourced", "compact-sourced", "resume-stale-generation", "resume-no-source"] as const)(
+    "%s keeps today's warning: the conversation is unverified", async mode => {
+      const { result, calls, observed, strict } = await sendAfterHook(mode);
+      expect(observed.state).toBe("unknown");
+      expect(strict).toBeNull();
+      expect(result.ok).toBe(true);
+      expect(result.warning).toContain("current conversation is unverified");
+      expect(calls).toEqual(["text", "enter"]);
+    });
 });

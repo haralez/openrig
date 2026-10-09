@@ -297,13 +297,15 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
     fingerprint: JSON.stringify(chain.map(row => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command, row.executablePath])) }));
 }
 
-function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string): NativeProcessObservation | null {
+function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string, rotatedFromToken?: string | null): NativeProcessObservation | null {
   const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
   if (matches.length !== 1) return null;
   const observation = matches[0]!;
   const { process } = observation;
   if (runtime === "claude-code") {
-    if (!expectedToken || claudeSessionToken(tokens(process.command).slice(1)) !== expectedToken) return null;
+    if (!expectedToken) return null;
+    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    if (launched !== expectedToken && !(rotatedFromToken && launched === rotatedFromToken)) return null;
   } else {
     const resumeToken = codexResumeToken(tokens(process.command).slice(1));
     if (requireResume && !expectedToken) return null;
@@ -321,12 +323,16 @@ async function observeNativePaneProcess(input: {
   requireResume?: boolean;
   /** Canonical executable frozen by the managed launch, never re-resolved at observation time. */
   selectedExecutable?: string;
+  /** Claude only: the launch token a resume-sourced, current-generation hook replaced with
+   *  `expectedToken` (`claudeRotatedFromToken`). argv may name it instead of `expectedToken`. */
+  rotatedFromToken?: string | null;
 }, runtime: NativeRuntime): Promise<NativeProcessObservation | null> {
   try {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
     const rows = await (input.listProcesses ?? listNativeProcesses)();
-    return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable);
+    return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
+      runtime === "claude-code" ? input.rotatedFromToken : undefined);
   } catch { return null; }
 }
 
@@ -431,10 +437,14 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
         // Do not promote either source over the other; ordinary delivery warns on
         // uncertainty. Live lineage/binding conflicts and strict resume proof stay
         // separate. A shim's token is never inherited by an opaque child.
-        if (named.size === 1 && !named.has(input.expectedToken)) {
+        // The one exception is a launch token the runtime itself reported resuming
+        // into the stored one, for this occupant generation (rotatedFromToken).
+        const rotatedFrom = input.rotatedFromToken || null;
+        const launchedAs = (token: unknown) => token === input.expectedToken || (!!rotatedFrom && token === rotatedFrom);
+        if (named.size === 1 && ![...named].some(launchedAs)) {
           return { state: "unknown", detail: "Claude launch identity differs from the stored conversation; current conversation is unverified", fingerprint };
         }
-        return identities[0] === input.expectedToken
+        return launchedAs(identities[0])
           ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }
           : { ...unknown, fingerprint };
       }

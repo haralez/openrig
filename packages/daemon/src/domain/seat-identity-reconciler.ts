@@ -1,5 +1,6 @@
 import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
+import { claudeRotatedFromToken } from "./session-registry.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -70,6 +71,9 @@ interface RunningSeatRow {
   session_name: string;
   tmux_pane: string | null;
   resume_token?: string | null;
+  resume_provenance?: string | null;
+  resume_source?: string | null;
+  resume_rotated_from?: string | null;
 }
 
 type PaneObservation = { pid: number | null; command: string | null };
@@ -113,7 +117,9 @@ export class SeatIdentityReconciler {
   private runningSeats(): RunningSeatRow[] {
     return this.db.prepare(`
       SELECT n.id as node_id, n.runtime as runtime,
-             s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token
+             s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
+             s.resume_provenance as resume_provenance, s.resume_source as resume_source,
+             s.resume_rotated_from as resume_rotated_from
       FROM nodes n
       JOIN sessions s ON s.node_id = n.id
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -217,7 +223,7 @@ export class SeatIdentityReconciler {
       });
       return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess
         : seat.resume_token !== null && seat.resume_token !== undefined ? observeClaudePaneProcess : observeClaudePaneRuntime)({
-        target: seat.tmux_pane!, tmux, expectedToken: seat.resume_token,
+        target: seat.tmux_pane!, tmux, expectedToken: seat.resume_token, rotatedFromToken: claudeRotatedFromToken(seat),
         listProcesses: () => snapshot ??= this.listProcesses(),
       })));
     };

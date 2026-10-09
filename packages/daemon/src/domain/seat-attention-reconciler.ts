@@ -2,7 +2,7 @@
 // startup_status=attention_required. Managed writer + append-only audit.
 
 import type Database from "better-sqlite3";
-import type { SessionRegistry } from "./session-registry.js";
+import { claudeRotatedFromToken, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
@@ -19,6 +19,17 @@ type ProcessRow = NativeProcessRow;
 export type PaneIdentityReconcileResult =
   | { ok: true; pane: string; pid: number; command: string | null }
   | { ok: false; detail: string };
+
+/** The rotated-from launch token recorded with the node's current stored token, when the caller is
+ *  checking that stored token (#1077). Exact-resume callers name a launch token and never use it. */
+function storedRotatedFromToken(db: Database.Database, nodeId: string, expectedToken: string): string | null {
+  try {
+    const row = db.prepare(
+      "SELECT resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1",
+    ).get(nodeId) as Parameters<typeof claudeRotatedFromToken>[0];
+    return row?.resume_token === expectedToken ? claudeRotatedFromToken(row) : null;
+  } catch { return null; }
+}
 
 /** Rebind one managed seat to the sole pane currently in its named tmux
  * session and positively identify its declared agent runtime. */
@@ -99,7 +110,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
     runtimeMatch = "match";
     const observation = { target: pane.id, tmux: input.tmux, listProcesses: input.listProcesses };
     const native = expectedResumeToken !== null
-      ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken })
+      ? await verifyClaudePaneProcess({ ...observation, expectedToken: expectedResumeToken,
+        rotatedFromToken: input.requireExactResumeLineage ? null : storedRotatedFromToken(input.db, input.nodeId, expectedResumeToken) })
       : claudeWrapper && !input.requireExactResumeLineage ? await verifyClaudePaneRuntime(observation) : null;
     const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
     const currentPid = await input.tmux.getPanePid(pane.id).catch(() => null);

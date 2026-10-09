@@ -215,8 +215,20 @@ activityRoutes.post("/hooks", async (c) => {
     // tokenPersisted reports the stored state, not format validity: a higher-provenance token
     // (operator) refuses the hook write, which only counts as persisted when it already matches.
     const validation = validateResumeToken(runtime, sessionId);
+    const persistHook = (type: string, token: string): boolean => {
+      if (runtime !== "claude-code") return sessionRegistry.updateResumeToken(resolved.sessionId, type, token, "hook");
+      // A Claude hook also says how the session began. That only counts as evidence about this
+      // seat's launch when the post carries the node's current occupant generation (#1077).
+      const generation = stringOrNull(body.generation);
+      let currentGeneration = false;
+      try {
+        currentGeneration = !!generation && sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid === generation;
+      } catch { /* an unreadable ledger is no evidence */ }
+      return sessionRegistry.recordHookSessionIdentity(resolved.sessionId, type, token,
+        { source: stringOrNull(body.source), currentGeneration });
+    };
     const tokenPersisted = validation.ok
-      && (sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+      && (persistHook(validation.resumeType, validation.token)
         || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
     eventBus.emit({
       type: "agent.session_identity",

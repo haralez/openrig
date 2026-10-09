@@ -61,6 +61,20 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  // #1077 — launched with review-token, continued as rotated-token; the hook recorded how.
+  it.each([["resume", "review-token", 200, "ready"], ["clear", null, 422, "attention_required"]] as const)(
+    "clear-attention after a %s into a new id answers %s", async (source, rotatedFrom, status, startup) => {
+      const f = fixture("rotated-token");
+      f.db.prepare("UPDATE sessions SET resume_provenance = 'hook', resume_source = ?, resume_rotated_from = ? WHERE id = ?")
+        .run(source, rotatedFrom, f.session.id);
+      const result = await f.post();
+      expect(result.status, JSON.stringify(result.body)).toBe(status);
+      expect(f.startup()).toBe(startup);
+      expect(f.sendVerify).not.toHaveBeenCalled();
+      // An exact-resume check names a launch token itself and never borrows the rotation.
+      expect((await f.verify(true)).ok).toBe(false);
+    });
+
   it.each([
     ["relative settings file", ["--settings", '"review.json', "--session-id", "review-token"]],
     ["name before identity", ["--name", '"review-desk', "--session-id", "review-token"]],

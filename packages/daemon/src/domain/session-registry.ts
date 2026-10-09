@@ -38,6 +38,25 @@ interface BindingFields {
   cmuxSurface?: string;
 }
 
+/** A token write that changes the value invalidates what was known about how the old one began. */
+const CLEAR_ROTATION_ON_TOKEN_CHANGE =
+  "resume_source = CASE WHEN resume_token IS ? THEN resume_source ELSE NULL END, " +
+  "resume_rotated_from = CASE WHEN resume_token IS ? THEN resume_rotated_from ELSE NULL END";
+
+/** The launch token a Claude identity proof may accept in argv besides the stored one (#1077): the
+ *  token a resume-sourced, current-generation hook replaced. Null unless the stored token is still
+ *  that hook's own record. Callers pass it as `rotatedFromToken`. */
+export function claudeRotatedFromToken(row: {
+  resume_token?: string | null;
+  resume_provenance?: string | null;
+  resume_source?: string | null;
+  resume_rotated_from?: string | null;
+} | null | undefined): string | null {
+  if (!row || row.resume_provenance !== "hook" || row.resume_source !== "resume") return null;
+  const from = row.resume_rotated_from?.trim();
+  return from && from !== row.resume_token?.trim() ? from : null;
+}
+
 /** Resume-token provenance precedence (OPR.0.4.0.22; adoption rung added by
  *  OPR.0.4.3.20 FR-3). Higher rank wins; a lower-rank write never overwrites a
  *  higher-rank persisted token.
@@ -345,10 +364,36 @@ export class SessionRegistry {
     this.db
       .prepare(
         "UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = COALESCE(?, resume_provenance), " +
-          "resume_last_verified = datetime('now'), resume_last_probe_status = 'resumable' WHERE id = ?",
+          "resume_last_verified = datetime('now'), resume_last_probe_status = 'resumable', " +
+          `${CLEAR_ROTATION_ON_TOKEN_CHANGE} WHERE id = ?`,
       )
-      .run(type, token, prov, sessionId);
+      .run(type, token, prov, token, token, sessionId);
     return true;
+  }
+
+  /** Record a Claude SessionStart hook's session id, with the evidence of how it began (#1077).
+   *
+   * The write itself follows `updateResumeToken`'s hook rank. When it changes the token, the hook's
+   * `source` is kept only if the post carried the node's current occupant generation; for `resume`,
+   * the replaced token is kept too, as the one launch identity the proof may still accept in argv.
+   * A post without that evidence records neither, which leaves today's refusal in place. */
+  recordHookSessionIdentity(
+    sessionId: string,
+    type: string,
+    token: string,
+    evidence: { source: string | null; currentGeneration: boolean },
+  ): boolean {
+    return this.db.transaction(() => {
+      const before = this.db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(sessionId) as
+        { resume_token: string | null } | undefined;
+      if (!this.updateResumeToken(sessionId, type, token, "hook")) return false;
+      const previous = before?.resume_token?.trim() || null;
+      if (previous === token.trim()) return true;
+      const source = evidence.currentGeneration ? evidence.source : null;
+      this.db.prepare("UPDATE sessions SET resume_source = ?, resume_rotated_from = ? WHERE id = ?")
+        .run(source, source === "resume" ? previous : null, sessionId);
+      return true;
+    })();
   }
 
   /** Test durable identity without returning the stored credential or changing
@@ -373,7 +418,7 @@ export class SessionRegistry {
     const result = this.db
       .prepare(
         "UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = NULL, " +
-          "resume_last_verified = NULL, resume_last_probe_status = NULL " +
+          "resume_last_verified = NULL, resume_last_probe_status = NULL, resume_source = NULL, resume_rotated_from = NULL " +
           "WHERE id = ? AND (resume_token IS NULL OR trim(resume_token) = '') " +
           "AND resume_provenance IS NULL AND resume_last_verified IS NULL AND resume_last_probe_status IS NULL",
       )
@@ -439,7 +484,7 @@ export class SessionRegistry {
     // validate path marks-stale instead of clearing, so this has no in-tree
     // caller on the live path; kept for explicit-clear callers/tests.
     this.db
-      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL, resume_last_verified = NULL, resume_last_probe_status = NULL WHERE id = ?")
+      .prepare("UPDATE sessions SET resume_type = NULL, resume_token = NULL, resume_provenance = NULL, resume_last_verified = NULL, resume_last_probe_status = NULL, resume_source = NULL, resume_rotated_from = NULL WHERE id = ?")
       .run(sessionId);
   }
 

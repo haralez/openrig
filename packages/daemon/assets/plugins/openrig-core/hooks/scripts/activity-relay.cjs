@@ -154,6 +154,10 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
   const sessionName = firstString(env.OPENRIG_SESSION_NAME, env.RIGGED_SESSION_NAME);
   const nodeId = firstString(env.OPENRIG_NODE_ID, env.RIGGED_NODE_ID);
   const runtime = firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME);
+  const generation = firstString(env.OPENRIG_OCCUPANT_GENERATION, env.RIGGED_OCCUPANT_GENERATION);
+  // How this session began (startup, resume, clear or compact). The daemon tells a resumed
+  // conversation's new id from a /clear by it; it is absent from runtimes that do not report it.
+  const source = firstString(providerPayload.source);
 
   if ((!sessionName && !nodeId) || !runtime) return null;
 
@@ -162,7 +166,9 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     sessionName,
     nodeId,
     runtime,
+    generation,
     hookEvent,
+    source,
     sessionId,
     occurredAt: now().toISOString(),
   };
