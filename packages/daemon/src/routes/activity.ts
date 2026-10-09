@@ -225,7 +225,7 @@ activityRoutes.post("/hooks", async (c) => {
         currentGeneration = !!generation && sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid === generation;
       } catch { /* an unreadable ledger is no evidence */ }
       return sessionRegistry.recordHookSessionIdentity(resolved.sessionId, type, token,
-        { source: stringOrNull(body.source), currentGeneration });
+        { source: stringOrNull(body.source), currentGeneration, resumeLaunch: stringOrNull(body.resumeLaunch) });
     };
     const tokenPersisted = validation.ok
       && (persistHook(validation.resumeType, validation.token)

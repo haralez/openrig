@@ -173,17 +173,18 @@ describe("A3 Claude shell sampling", () => {
     ["clear", null, "mismatch"],
     ["startup", null, "mismatch"],
     ["resume", "other-token", "mismatch"],
-  ] as const)("a rotated stored token with source %s (replaced %s) reads %s", async (source, rotatedFrom, expected) => {
+  ] as const)("a rotated stored token with source %s (replaced %s) reads %s", async (_source, rotatedFrom, expected) => {
     const f = fixture();
-    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'hook', resume_source = ?, resume_rotated_from = ?")
-      .run(source, rotatedFrom);
+    // The registry records resume_rotated_from only for a resume into a new id; other sources leave it null.
+    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'hook', resume_rotated_from = ?")
+      .run(rotatedFrom);
     await f.rec.reconcileAll();
     expect(f.verdict()?.verdict).toBe(expected);
   });
 
   it("does not accept a recorded resume once the stored token is an operator's", async () => {
     const f = fixture();
-    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'operator', resume_source = 'resume', resume_rotated_from = 'saved-token'").run();
+    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'operator', resume_rotated_from = 'saved-token'").run();
     await f.rec.reconcileAll();
     expect(f.verdict()?.verdict).toBe("mismatch");
   });

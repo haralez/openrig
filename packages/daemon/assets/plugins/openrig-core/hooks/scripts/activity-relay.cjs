@@ -158,6 +158,9 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
   // How this session began (startup, resume, clear or compact). The daemon tells a resumed
   // conversation's new id from a /clear by it; it is absent from runtimes that do not report it.
   const source = firstString(providerPayload.source);
+  // Set only on the command OpenRig sends to resume this seat, so the daemon can tell the process
+  // it launched from another Claude sharing the seat's environment.
+  const resumeLaunch = firstString(env.OPENRIG_RESUME_LAUNCH);
 
   if ((!sessionName && !nodeId) || !runtime) return null;
 
@@ -169,6 +172,7 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     generation,
     hookEvent,
     source,
+    resumeLaunch,
     sessionId,
     occurredAt: now().toISOString(),
   };

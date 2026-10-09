@@ -823,7 +823,7 @@ interface SessionTransportDeps {
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
 interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
-  resume_provenance: string | null; resume_source: string | null; resume_rotated_from: string | null; }
+  resume_provenance: string | null; resume_rotated_from: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
 
@@ -908,7 +908,6 @@ export class SessionTransport {
         b.tmux_pane AS pane,
         s.resume_token AS resume_token,
         s.resume_provenance AS resume_provenance,
-        s.resume_source AS resume_source,
         s.resume_rotated_from AS resume_rotated_from,
         (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id = n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
       FROM sessions s

@@ -28,8 +28,10 @@ type Mode = "unchanged" | "rotation" | "duplicate-hook" | "delayed-hook" | "shim
   | "delayed-rotated-hook" | "probe-refresh"
   | SourcedMode;
 // #1077 — the hook also reports SessionStart's source and the seat's occupant generation.
+// It also forwards OPENRIG_RESUME_LAUNCH, which only the command OpenRig sent carries.
 const sourcedModes = ["resume-rotation", "resume-then-clear", "clear-sourced", "startup-sourced",
-  "compact-sourced", "resume-stale-generation", "resume-no-source"] as const;
+  "compact-sourced", "resume-stale-generation", "resume-no-source",
+  "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume"] as const;
 type SourcedMode = typeof sourcedModes[number];
 const tokenOnlyModes = ["N1-settings-before", "settings-after", "plain-wrong-token", "lone-wrong-shim"] as const;
 
@@ -45,6 +47,8 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     const session = registry.registerSession(node.id, name);
     registry.updateStatus(session.id, "running");
     registry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
+    // OpenRig launched this seat with `--resume original`.
+    registry.recordResumeLaunch(session.id, original);
     const store = new AgentActivityStore({ db, eventBus });
     const app = new Hono();
     app.use("*", async (c, next) => {
@@ -56,7 +60,7 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     });
     app.route("/api/activity", activityRoutes);
     const generation = registry.currentOccupantTenure(node.id)!.generationUuid;
-    const hook = async (token: string, occurredAt?: string, evidence: { source?: string; generation?: string } = {}) => {
+    const hook = async (token: string, occurredAt?: string, evidence: { source?: string; generation?: string; resumeLaunch?: string } = {}) => {
       const response = await app.request("/api/activity/hooks", {
         method: "POST",
         headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
@@ -73,8 +77,14 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     if (sourced) {
       const source = mode === "clear-sourced" ? "clear" : mode === "startup-sourced" ? "startup"
         : mode === "compact-sourced" ? "compact" : mode === "resume-no-source" ? undefined : "resume";
-      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation });
-      if (mode === "resume-then-clear") await hook(third, undefined, { source: "clear", generation });
+      // A Claude started by hand in the pane carries no marker; a stale one names another launch.
+      const resumeLaunch = mode === "resume-no-marker" ? undefined : mode === "resume-other-marker" ? third : original;
+      // The launched process's own first hook kept its id. What follows is an in-process /resume,
+      // or a child `claude -p --resume` that inherited the seat's environment, marker included.
+      if (mode === "resume-after-launch-hook") await hook(original, undefined, { source: "resume", generation, resumeLaunch });
+      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation, resumeLaunch });
+      if (mode === "resume-then-clear" || mode === "resume-clear-resume") await hook(third, undefined, { source: "clear", generation });
+      if (mode === "resume-clear-resume") await hook(rotated, undefined, { source: "resume", generation, resumeLaunch });
     } else if (mode !== "unchanged" && !tokenOnly) {
       await hook(rotated, mode === "delayed-rotated-hook" ? "2000-01-01T00:00:00Z" : undefined);
     }
@@ -149,7 +159,7 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     expect(send).toHaveBeenCalledTimes(1);
     const result = await send.mock.results[0]!.value;
     const stored = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(session.id) as { resume_token: string };
-    const rotation = db.prepare("SELECT resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE id = ?")
+    const rotation = db.prepare("SELECT resume_token, resume_provenance, resume_rotated_from FROM sessions WHERE id = ?")
       .get(session.id) as Parameters<typeof claudeRotatedFromToken>[0];
     // Independent of delivery effects: strict identity stays unproved for a mismatch.
     const input = { target: "%1", tmux, listProcesses: async () => rows, expectedToken: stored.resume_token,
@@ -223,7 +233,8 @@ describe("a resumed conversation that changed its id, with the hook's evidence (
     expect(calls).toEqual(["text", "enter"]);
   });
 
-  it.each(["clear-sourced", "resume-then-clear", "startup-sourced", "compact-sourced", "resume-stale-generation", "resume-no-source"] as const)(
+  it.each(["clear-sourced", "resume-then-clear", "startup-sourced", "compact-sourced", "resume-stale-generation", "resume-no-source",
+    "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume"] as const)(
     "%s keeps today's warning: the conversation is unverified", async mode => {
       const { result, calls, observed, strict } = await sendAfterHook(mode);
       expect(observed.state).toBe("unknown");

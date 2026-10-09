@@ -25,7 +25,7 @@ export type PaneIdentityReconcileResult =
 function storedRotatedFromToken(db: Database.Database, nodeId: string, expectedToken: string): string | null {
   try {
     const row = db.prepare(
-      "SELECT resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1",
+      "SELECT resume_token, resume_provenance, resume_rotated_from FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1",
     ).get(nodeId) as Parameters<typeof claudeRotatedFromToken>[0];
     return row?.resume_token === expectedToken ? claudeRotatedFromToken(row) : null;
   } catch { return null; }

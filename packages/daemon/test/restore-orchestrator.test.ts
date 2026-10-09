@@ -3300,19 +3300,26 @@ describe("RestoreOrchestrator", () => {
     });
 
     // #1077 — the seat launched with --resume tok-abc-123 and Claude continued as a new id. The
-    // strict reconciler still demands exact argv lineage, against the launch token the hook named.
+    // strict reconciler keeps main's exact current-token path and accepts the launch token only as
+    // the alternative a qualified rotation names: the launched process's own first hook, a resume.
     it.each([
-      ["resume", true],
-      ["clear", false],
-    ] as const)("matches argv to the launch token a recorded Claude resume replaced (source %s)", async (source, accepted) => {
+      ["a resume from the launched process", "resume", "tok-abc-123", "tok-abc-123", true],
+      ["a /clear from the launched process", "clear", "tok-abc-123", "tok-abc-123", false],
+      ["a resume from a Claude started by hand in the pane (no marker)", "resume", null, "tok-abc-123", false],
+      ["a resume carrying another launch's marker", "resume", "tok-other-789", "tok-abc-123", false],
+      // An operator relaunched Claude on the stored token after a rotation was recorded: main's path.
+      ["argv on the current token after an old rotation record", "resume", "tok-abc-123", "tok-rotated-456", true],
+      ["argv on an unrelated token after a rotation record", "resume", "tok-abc-123", "tok-other-789", false],
+    ] as const)("reconciles Claude after %s", async (_label, source, resumeLaunch, argvToken, accepted) => {
       const tmux = mockTmuxForReconciler();
       vi.mocked(tmux.hasSession).mockResolvedValue(true);
       vi.mocked(tmux.getPaneCommand).mockResolvedValue("sh");
       vi.mocked(tmux.capturePaneContent).mockResolvedValue("Claude Code v2.1.220\n ❯ accept edits on");
       const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
       const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(seeded.nodeId) as { id: string };
-      sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true });
-      const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows("tok-abc-123") }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      sessionRegistry.recordResumeLaunch(session.id, "tok-abc-123");
+      sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true, resumeLaunch });
+      const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows(argvToken) }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
       expect(result.ok).toBe(accepted);
       if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
       expect(tmux.sendKeys).not.toHaveBeenCalled();

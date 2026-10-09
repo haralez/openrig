@@ -1669,15 +1669,15 @@ export class RestoreOrchestrator {
     }
 
     const sessRow = this.db.prepare(
-      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_source: string | null; resume_rotated_from: string | null } | undefined;
+      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_rotated_from FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null } | undefined;
     if (!sessRow || sessRow.session_name !== sessionName) {
       return { ok: false, code: "binding_mismatch", detail: `Canonical binding ${sessionName} does not match the latest session row.` };
     }
-    // argv carries the launch token. When Claude's hook recorded that this row's resume continued
-    // under a new id, the launch token is the one argv must match, exactly as before.
-    const expectedResumeToken = (sessRow.resume_type === "claude_id" ? claudeRotatedFromToken(sessRow) : null)
-      ?? sessRow.resume_token;
+    const expectedResumeToken = sessRow.resume_token;
+    // The one alternative argv may carry: the token OpenRig launched this row to resume, when the
+    // first hook after that launch recorded Claude continuing it as the stored token (#1077).
+    const rotatedFromToken = sessRow.resume_type === "claude_id" ? claudeRotatedFromToken(sessRow) : null;
     if (!expectedResumeToken) {
       return { ok: false, code: "resume_token_not_used", detail: "No resume token recorded on the latest session row." };
     }
@@ -1701,17 +1701,28 @@ export class RestoreOrchestrator {
       "SELECT runtime FROM nodes WHERE id = ?"
     ).get(nodeId) as { runtime: string | null } | undefined;
     const runtime = nodeRow?.runtime ?? null;
-    const identity = await rebindAndVerifyPaneIdentity({
+    const proveLineage = (token: string) => rebindAndVerifyPaneIdentity({
       db: this.db,
       sessionRegistry: this.sessionRegistry,
       tmux: this.tmuxAdapter,
       nodeId,
       sessionName,
       runtime,
-      expectedResumeToken,
+      expectedResumeToken: token,
       requireExactResumeLineage: true,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });
+    // The stored token first, exactly as before; the recorded rotation only when that fails. Both
+    // are the same exact-lineage proof.
+    let lineageToken = expectedResumeToken;
+    let identity = await proveLineage(expectedResumeToken);
+    if (!identity.ok && rotatedFromToken) {
+      const rotated = await proveLineage(rotatedFromToken);
+      if (rotated.ok) {
+        identity = rotated;
+        lineageToken = rotatedFromToken;
+      }
+    }
     if (!identity.ok) {
       return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };
     }
@@ -1720,7 +1731,7 @@ export class RestoreOrchestrator {
     const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
       target: identity.pane,
       tmux: this.tmuxAdapter,
-      expectedToken: expectedResumeToken,
+      expectedToken: lineageToken,
       requireResume: true,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });

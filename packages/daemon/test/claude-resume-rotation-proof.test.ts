@@ -1,8 +1,8 @@
-// #1077 — a resumed Claude seat whose session id changes. The seat launched with `--resume T1`,
-// Claude continued as T2 and its SessionStart hook recorded T2. The proof accepts T1 in argv only
-// when that hook said `source: resume` and carried the node's current occupant generation.
-// A /clear (source clear), a fresh startup, a compaction that changes the id, a stale generation and
-// a hook without a source all keep today's refusal.
+// #1077 — a resumed Claude seat whose session id changes. OpenRig launched the seat with
+// `--resume T1`, Claude continued as T2 and its SessionStart hook recorded T2. The proof accepts T1
+// in argv only when the first current-generation hook after that launch said `source: resume`.
+// Every other hook (a /clear, startup or compaction, no source, a stale generation, and anything
+// after the first) keeps today's refusal.
 
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,162 +26,138 @@ const T3 = "00000000-0000-4000-8000-000000001079";
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function seat(opts: { launched?: boolean } = {}) {
+function seat(opts: { armed?: boolean; launchWrite?: boolean } = {}) {
   const db = createDb(); databases.push(db);
   migrate(db, ALL_MIGRATIONS);
   const rigRepo = new RigRepository(db), registry = new SessionRegistry(db);
   const rig = rigRepo.createRig("rotation");
   const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
   const session = registry.registerSession(node.id, "dev-impl@rotation");
-  // The launch records the token it resumed (startup-orchestrator, provenance scrape).
-  if (opts.launched !== false) registry.updateResumeToken(session.id, "claude_id", T1, "scrape");
+  // OpenRig arms the launch before starting `claude --resume T1` (startup-orchestrator, legacy restore).
+  if (opts.armed !== false) registry.recordResumeLaunch(session.id, T1);
+  // The launch path may write T1 afterwards (provenance scrape); the hook can also land first.
+  if (opts.launchWrite !== false) registry.updateResumeToken(session.id, "claude_id", T1, "scrape");
   const generation = registry.currentOccupantTenure(node.id)!.generationUuid;
   const row = () => db.prepare(
-    "SELECT resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE id = ?",
-  ).get(session.id) as { resume_token: string; resume_provenance: string; resume_source: string | null; resume_rotated_from: string | null };
-  const hook = (token: string, source: string | null, currentGeneration = true) =>
-    registry.recordHookSessionIdentity(session.id, "claude_id", token, { source, currentGeneration });
+    "SELECT resume_token, resume_provenance, resume_launch_token, resume_rotated_from FROM sessions WHERE id = ?",
+  ).get(session.id) as { resume_token: string; resume_provenance: string; resume_launch_token: string | null; resume_rotated_from: string | null };
+  // By default the hook comes from the process OpenRig launched, whose command carried the marker.
+  const hook = (token: string, source: string | null, currentGeneration = true, resumeLaunch: string | null = T1) =>
+    registry.recordHookSessionIdentity(session.id, "claude_id", token, { source, currentGeneration, resumeLaunch });
   return { db, registry, session, node, generation, row, hook };
 }
 
-describe("recording how a Claude session began", () => {
-  it("a resume into a new id, for the current generation, keeps the replaced launch token", () => {
-    const s = seat();
+describe("the first hook after OpenRig's --resume launch", () => {
+  it.each([true, false])("a resume into a new id names the launch token (launch wrote T1 first: %s)", (launchWrite) => {
+    const s = seat({ launchWrite });
     expect(s.hook(T2, "resume")).toBe(true);
-    expect(s.row()).toEqual({ resume_token: T2, resume_provenance: "hook", resume_source: "resume", resume_rotated_from: T1 });
+    expect(s.row()).toEqual({ resume_token: T2, resume_provenance: "hook", resume_launch_token: null, resume_rotated_from: T1 });
     expect(claudeRotatedFromToken(s.row())).toBe(T1);
+    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(true);
   });
 
-  it.each(["clear", "startup", "compact"])("source %s into a new id records the source but no accepted launch token", (source) => {
+  it.each(["clear", "startup", "compact", null])("source %s consumes the launch and names nothing", (source) => {
     const s = seat();
     s.hook(T2, source);
-    expect(s.row()).toMatchObject({ resume_token: T2, resume_source: source, resume_rotated_from: null });
+    expect(s.row()).toMatchObject({ resume_token: T2, resume_launch_token: null, resume_rotated_from: null });
+    // A resume after that (in-process /resume, a child `claude -p --resume`) has no launch to name.
+    s.hook(T3, "resume");
+    expect(claudeRotatedFromToken(s.row())).toBeNull();
+  });
+
+  it("a resume that kept the id consumes the launch; a later in-process /resume names nothing", () => {
+    const s = seat();
+    s.hook(T1, "resume");
+    expect(s.row()).toMatchObject({ resume_token: T1, resume_launch_token: null, resume_rotated_from: null });
+    s.hook(T2, "resume");
     expect(claudeRotatedFromToken(s.row())).toBeNull();
   });
 
   it.each([
-    ["no source (older Claude, other runtimes)", null, true],
-    ["a stale occupant generation", "resume", false],
-  ] as const)("%s is no evidence: fail closed", (_label, source, currentGeneration) => {
+    ["a Claude started by hand in the pane (no marker), or a relay that predates it", null],
+    ["a marker naming another launch", T3],
+  ] as const)("%s consumes the launch and names nothing", (_label, marker) => {
     const s = seat();
-    s.hook(T2, source, currentGeneration);
-    expect(s.row()).toMatchObject({ resume_token: T2, resume_source: null, resume_rotated_from: null });
+    s.hook(T2, "resume", true, marker);
+    expect(s.row()).toMatchObject({ resume_token: T2, resume_launch_token: null, resume_rotated_from: null });
+    s.hook(T3, "resume");
     expect(claudeRotatedFromToken(s.row())).toBeNull();
   });
 
-  it("a later hook for the same id (for example a compaction) keeps the resume record", () => {
+  it("a stale-generation hook neither qualifies nor consumes the launch", () => {
+    const s = seat();
+    s.hook(T3, "resume", false);
+    expect(s.row()).toMatchObject({ resume_launch_token: T1, resume_rotated_from: null });
+    s.hook(T2, "resume");
+    expect(claudeRotatedFromToken(s.row())).toBe(T1);
+  });
+
+  it("a hook the provenance rank refuses still consumes the launch and records nothing", () => {
+    const s = seat();
+    s.registry.updateResumeToken(s.session.id, "claude_id", T1, "operator");
+    expect(s.hook(T2, "resume")).toBe(false);
+    expect(s.row()).toMatchObject({ resume_token: T1, resume_launch_token: null, resume_rotated_from: null });
+  });
+
+  it("without an armed launch (fresh, or a process OpenRig did not launch) nothing qualifies", () => {
+    const fresh = seat({ armed: false });
+    fresh.hook(T2, "resume");
+    expect(claudeRotatedFromToken(fresh.row())).toBeNull();
+    const freshFallback = seat();
+    freshFallback.registry.recordResumeLaunch(freshFallback.session.id, null);
+    freshFallback.hook(T2, "resume");
+    expect(claudeRotatedFromToken(freshFallback.row())).toBeNull();
+  });
+});
+
+describe("after a recorded rotation", () => {
+  const rotated = () => {
     const s = seat();
     s.hook(T2, "resume");
+    return s;
+  };
+
+  it.each([
+    ["an in-process /resume", "resume"],
+    ["a child claude -p --resume sharing the seat's environment", "resume"],
+    ["a /clear", "clear"],
+  ] as const)("%s drops it and names nothing new", (_label, source) => {
+    const s = rotated();
+    s.hook(T3, source);
+    expect(s.row()).toMatchObject({ resume_token: T3, resume_rotated_from: null });
+    expect(claudeRotatedFromToken(s.row())).toBeNull();
+  });
+
+  it("a later hook for the same id (a compaction) keeps it", () => {
+    const s = rotated();
     s.hook(T2, "compact");
     expect(claudeRotatedFromToken(s.row())).toBe(T1);
   });
 
-  it("one hop: a /clear after the resume drops the acceptance", () => {
-    const s = seat();
-    s.hook(T2, "resume");
-    s.hook(T3, "clear");
-    expect(s.row()).toMatchObject({ resume_token: T3, resume_source: "clear", resume_rotated_from: null });
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
-  });
-
-  it("an operator token, or any other write that changes the token, drops the record", () => {
-    const s = seat();
-    s.hook(T2, "resume");
+  it("an operator token, or any other write that changes the token, drops it", () => {
+    const s = rotated();
     s.registry.updateResumeToken(s.session.id, "claude_id", T3, "operator");
-    expect(s.row()).toMatchObject({ resume_token: T3, resume_provenance: "operator", resume_source: null, resume_rotated_from: null });
+    expect(s.row()).toMatchObject({ resume_token: T3, resume_provenance: "operator", resume_rotated_from: null });
     expect(claudeRotatedFromToken(s.row())).toBeNull();
   });
 
-  it("an equal-value refresh by another writer keeps the record", () => {
-    const s = seat();
-    s.hook(T2, "resume");
+  it("an equal-value refresh or a later launch-path write of T1 keeps it", () => {
+    const s = rotated();
     s.registry.updateResumeToken(s.session.id, "claude_id", T2, "hook");
-    expect(claudeRotatedFromToken(s.row())).toBe(T1);
-  });
-
-  it("a hook the provenance rank refuses records nothing", () => {
-    const s = seat();
-    s.registry.updateResumeToken(s.session.id, "claude_id", T1, "operator");
-    expect(s.hook(T2, "resume")).toBe(false);
-    expect(s.row()).toMatchObject({ resume_token: T1, resume_source: null, resume_rotated_from: null });
-  });
-});
-
-describe("a resume hook that lands before the launch records its token", () => {
-  // Claude's SessionStart can fire while the launch is still settling, before any launch path writes
-  // T1 (or, on an attention or legacy path, without one ever writing it). The launch token, recorded
-  // before the launch, is what the hook names then.
-  const early = () => {
-    const s = seat({ launched: false });
-    s.registry.recordResumeLaunch(s.session.id, T1);
-    return s;
-  };
-
-  it("names the launch token the resume replaced", () => {
-    const s = early();
-    s.hook(T2, "resume");
-    expect(s.row()).toEqual({ resume_token: T2, resume_provenance: "hook", resume_source: "resume", resume_rotated_from: T1 });
-    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(true);
-  });
-
-  it("a later launch-path write of T1 loses to the hook and leaves the record", () => {
-    const s = early();
-    s.hook(T2, "resume");
     s.registry.updateResumeToken(s.session.id, "claude_id", T1, "scrape");
     s.registry.recordResumeAttempt(s.session.id, "claude_id", T1);
     expect(claudeRotatedFromToken(s.row())).toBe(T1);
   });
-
-  it.each(["clear", "startup", "compact", null])("an early hook with source %s names nothing", (source) => {
-    const s = early();
-    s.hook(T2, source);
-    expect(s.row()).toMatchObject({ resume_token: T2, resume_rotated_from: null });
-    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(false);
-  });
-
-  it("an early hook for a stale generation names nothing", () => {
-    const s = early();
-    s.hook(T2, "resume", false);
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
-  });
-
-  it("an early resume hook that kept the id needs no rotation", () => {
-    const s = early();
-    s.hook(T1, "resume");
-    expect(s.row()).toMatchObject({ resume_token: T1, resume_source: null, resume_rotated_from: null });
-  });
-
-  it("a stored token outranks the launch token as what the resume replaced", () => {
-    const s = seat();
-    s.registry.recordResumeLaunch(s.session.id, T3);
-    s.hook(T2, "resume");
-    expect(s.row()).toMatchObject({ resume_token: T2, resume_rotated_from: T1 });
-  });
-
-  it("a fresh launch records no launch token", () => {
-    const s = seat({ launched: false });
-    s.registry.recordResumeLaunch(s.session.id, T1);
-    s.registry.recordResumeLaunch(s.session.id, null);
-    s.hook(T2, "resume");
-    expect(claudeRotatedFromToken(s.row())).toBeNull();
-  });
-
-  it("one hop: a /clear and a later in-process resume name the cleared conversation, not the launch", () => {
-    const s = early();
-    s.hook(T2, "clear");
-    s.hook(T3, "resume");
-    expect(claudeRotatedFromToken(s.row())).toBe(T2);
-    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(false);
-  });
 });
 
 describe("the relay forwards the evidence", () => {
-  it("sends SessionStart's source and the seat's occupant generation with the session id", () => {
+  it("sends SessionStart's source, the occupant generation and the launch marker with the session id", () => {
     const payload = relay.buildSessionIdentityPayload(
       { hook_event_name: "SessionStart", session_id: T2, source: "resume" },
-      { OPENRIG_SESSION_NAME: "dev-impl@rotation", OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "gen-1" },
+      { OPENRIG_SESSION_NAME: "dev-impl@rotation", OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "gen-1",
+        OPENRIG_RESUME_LAUNCH: T1 },
     );
-    expect(payload).toMatchObject({ eventFamily: "session_identity", sessionId: T2, source: "resume", generation: "gen-1" });
+    expect(payload).toMatchObject({ eventFamily: "session_identity", sessionId: T2, source: "resume", generation: "gen-1", resumeLaunch: T1 });
   });
 
   it("sends nulls when the runtime or launch did not provide them", () => {
@@ -189,7 +165,7 @@ describe("the relay forwards the evidence", () => {
       { hook_event_name: "SessionStart", session_id: T2 },
       { OPENRIG_SESSION_NAME: "dev-impl@rotation", OPENRIG_RUNTIME: "claude-code" },
     );
-    expect(payload).toMatchObject({ sessionId: T2, source: null, generation: null });
+    expect(payload).toMatchObject({ sessionId: T2, source: null, generation: null, resumeLaunch: null });
   });
 });
 

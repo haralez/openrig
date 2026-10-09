@@ -72,7 +72,6 @@ interface RunningSeatRow {
   tmux_pane: string | null;
   resume_token?: string | null;
   resume_provenance?: string | null;
-  resume_source?: string | null;
   resume_rotated_from?: string | null;
 }
 
@@ -118,7 +117,7 @@ export class SeatIdentityReconciler {
     return this.db.prepare(`
       SELECT n.id as node_id, n.runtime as runtime,
              s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
-             s.resume_provenance as resume_provenance, s.resume_source as resume_source,
+             s.resume_provenance as resume_provenance,
              s.resume_rotated_from as resume_rotated_from
       FROM nodes n
       JOIN sessions s ON s.node_id = n.id

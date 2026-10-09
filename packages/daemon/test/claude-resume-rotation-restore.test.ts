@@ -70,16 +70,19 @@ describe("managed Claude full down/up", () => {
         await next();
       });
       hooks.route("/api/activity", activityRoutes);
-      const row = () => db.prepare("SELECT id, resume_token, resume_provenance, resume_source, resume_rotated_from, startup_status FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as Record<string, unknown>;
+      const row = () => db.prepare("SELECT id, resume_token, resume_provenance, resume_rotated_from, startup_status FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as Record<string, unknown>;
       const hook = async () => {
         const response = await hooks.request("/api/activity/hooks", { method: "POST",
           headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
           body: JSON.stringify({ eventFamily: "session_identity", hookEvent: "SessionStart", sessionName: name, nodeId: node.id,
             runtime: "claude-code", generation: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid,
-            source: timing.startsWith("clear") ? "clear" : "resume", sessionId: rotated }) });
+            source: timing.startsWith("clear") ? "clear" : "resume", resumeLaunch: launchMarker, sessionId: rotated }) });
         expect(response.status).toBe(200);
         expect(await response.json()).toMatchObject({ tokenPersisted: true });
       };
+      // The relay forwards the marker the launched process's command carried, as the real one does.
+      let launchMarker: string | undefined;
+      const launched = (cmd: string) => { launchMarker = /OPENRIG_RESUME_LAUNCH='?([^' ]+)/.exec(cmd)?.[1]; };
       let live = true;
       const tmux = {
         hasSession: vi.fn(async () => live),
@@ -96,8 +99,8 @@ describe("managed Claude full down/up", () => {
         getPanePid: vi.fn(async () => mode === "unobserved-pane-process" ? 999 : 100),
         getPaneCommand: vi.fn(async () => mode === "bare-shell" ? "bash" : "sh"),
         capturePaneContent: vi.fn(async () => autoScreen),
-        sendText: vi.fn(async () => ({ ok: true })),
-        sendShellCommand: vi.fn(async () => { if (timing.endsWith("before-ready")) await hook(); return { ok: true }; }),
+        sendText: vi.fn(async (_session: string, cmd: string) => { launched(cmd); return { ok: true }; }),
+        sendShellCommand: vi.fn(async (_session: string, cmd: string) => { launched(cmd); if (timing.endsWith("before-ready")) await hook(); return { ok: true }; }),
         sendKeys: vi.fn(async () => ({ ok: true })),
       } as unknown as TmuxAdapter;
       const startedAt = "Thu Oct  1 05:53:16 2026";
@@ -113,7 +116,7 @@ describe("managed Claude full down/up", () => {
       expect(snapshotRepo.getSnapshot(down.snapshotId!)?.kind).toBe("auto-pre-down");
       expect(sessionRegistry.getBindingForNode(node.id)).toBeNull();
       const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
-        claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", executable: mode === "native" ? "/fixture/.local/share/claude/versions/2.1.285" : "/opt/claude.exe" }) } as unknown as ClaudeManagedLaunch,
+        claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[], env: Record<string, string> = {}) => [...Object.entries(env).map(([k, v]) => `${k}=${v}`), "claude", ...args].join(" "), assertCurrent: () => {}, configDir: "/fixture", executable: mode === "native" ? "/fixture/.local/share/claude/versions/2.1.285" : "/opt/claude.exe" }) } as unknown as ClaudeManagedLaunch,
         fsOps: {
         exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {},
       } });
@@ -144,7 +147,7 @@ describe("managed Claude full down/up", () => {
       const resumed = timing.startsWith("resume");
       expect(up.result.nodes[0].status).toBe(resumed ? "resumed" : "attention_required");
       expect(row()).toMatchObject({ resume_token: rotated, resume_provenance: "hook",
-        resume_source: resumed ? "resume" : "clear", resume_rotated_from: resumed ? token : null });
+        resume_rotated_from: resumed ? token : null });
       expect(identity?.verdict).toBe(resumed ? "verified" : "mismatch");
       // A resumed seat has nothing to clear; a /clear seat cannot be proved and stays in attention.
       expect(cleared.status).toBe(resumed ? 409 : 422);
