@@ -3,7 +3,7 @@
 // its outcome, the Explorer's restore route shares that handling, and a join counts only the sessions
 // the automatic attempt itself launched. Derived from the maintainer's round-3 cases on a test build.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { classifyManagedKernel } from "../src/domain/kernel-boot.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -191,6 +191,41 @@ describe("a join counts only the automatic attempt's own sessions", () => {
       const answer = await h.upWhileHeld();
       expect(answer.status, JSON.stringify(answer.body)).toBeGreaterThanOrEqual(400);
       expect(token).not.toBe("00000000-0000-4000-8000-000000003078");
+    } finally { h.close(); }
+  });
+
+  // dev-review's boundary probes on ff17d37f; the replacement rows are synthetic registry insertions.
+  it.each(["during", "after"] as const)("does not join a different session carrying the same token: %s", async (when) => {
+    const h = await heldRestore({ at: "launch" });
+    try {
+      if (when === "after") await h.finish();
+      const own = newest(h);
+      const other = h.sessionRegistry.registerSession(h.node.id, name);
+      h.sessionRegistry.updateStatus(other.id, "running");
+      h.sessionRegistry.updateResumeToken(other.id, "claude_id", token, "operator");
+      expect(other.id).not.toBe(own.id);
+      const request = h.up();
+      if (when === "during") await h.finish();
+      const body = await (await request).json();
+      expect(JSON.stringify(body)).not.toContain("no second restore");
+    } finally { h.close(); }
+  });
+
+  it("revalidates a finished attempt after its terminal check: a stop made meanwhile wins", async () => {
+    const h = await heldRestore({ at: "launch" });
+    try {
+      await h.finish();
+      const own = newest(h);
+      vi.mocked(h.tmux.hasSession).mockImplementationOnce(async () => {
+        // The check saw the terminal; a real rig down completes before it returns.
+        const down = await h.post("/api/down", { rigId: h.rig.id });
+        expect(down.status).toBe(200);
+        expect(await down.json()).toMatchObject({ sessionsKilled: 1, errors: [] });
+        expect(h.db.prepare("SELECT status FROM sessions WHERE id = ?").get(own.id)).toEqual({ status: "exited" });
+        return true;
+      });
+      const body = await (await h.up()).json();
+      expect(JSON.stringify(body)).not.toContain("no second restore");
     } finally { h.close(); }
   });
 });

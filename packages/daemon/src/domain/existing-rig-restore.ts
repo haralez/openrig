@@ -133,13 +133,15 @@ export async function settleAutomaticRestore(db: Database.Database, rigId: strin
 
 type SeatRow = { id: string; resumeType: string | null; resumeToken: string | null; provenance: string | null };
 
-/** Whether every seat still holds what the attempt left or is about to restore: the session the
- *  attempt itself launched for it; for a seat it has not launched (yet), the session it is
- *  restoring, still naming the snapshot's resume target; or no live session at all. The attempt's
- *  own session may carry no token yet, or one its own launch reported (a resume that continued
- *  under a new id); an operator's correction to another token is a different target. Any other
- *  newer session is another occupant. */
-function seatsHeldByAttempt(db: Database.Database, rig: Rig, snapshot: Snapshot, attempt: AutomaticRestore): boolean {
+/** Whether every seat still holds what the attempt left or is about to restore:
+ *  - a seat the attempt has launched holds exactly that session, with no token yet, the snapshot's,
+ *    or one its own launch reported (a resume that continued under a new id). An operator's
+ *    correction to another token, or any other session, even one naming the same conversation, is
+ *    not the attempt's;
+ *  - a seat it has not launched still holds the session it is restoring, naming the snapshot's
+ *    resume target, or, while the attempt runs, none: it stands the old session down before
+ *    registering its own. */
+function seatsHeldByAttempt(db: Database.Database, rig: Rig, snapshot: Snapshot, attempt: AutomaticRestore, running: boolean): boolean {
   const newest = db.prepare(
     `SELECT id, resume_type AS resumeType, resume_token AS resumeToken, resume_provenance AS provenance FROM sessions
       WHERE node_id = ? AND status NOT IN ('superseded', 'exited')
@@ -147,33 +149,43 @@ function seatsHeldByAttempt(db: Database.Database, rig: Rig, snapshot: Snapshot,
   );
   return rig.nodes.every((node) => {
     const row = newest.get(node.id) as SeatRow | undefined;
-    // Between standing a seat's old session down and registering its own, the attempt leaves none.
-    if (!row) return true;
     const target = resolveActiveSnapshotSession(snapshot.data, node.id);
-    const sameTarget = target.kind === "resolved" && !!row.resumeToken
+    const sameTarget = target.kind === "resolved" && !!row?.resumeToken
       && row.resumeType === (target.session.resumeType ?? null) && row.resumeToken === (target.session.resumeToken ?? null);
-    if (attempt.launched.get(node.id) === row.id) {
-      return !row.resumeToken || sameTarget || row.provenance !== "operator";
-    }
+    const launched = attempt.launched.get(node.id);
+    if (launched) return row?.id === launched && (!row.resumeToken || sameTarget || row.provenance !== "operator");
+    if (!row) return running;
     if (target.kind === "none") return !row.resumeToken;
     return sameTarget;
   });
 }
 
-/** Whether the finished attempt restored every seat and each still runs the session it launched. */
-async function attemptStillRunning(db: Database.Database, rig: Rig, attempt: AutomaticRestore): Promise<boolean> {
+/** Whether every seat's terminal session the attempt launched still exists. */
+async function attemptTerminalsPresent(db: Database.Database, rig: Rig, attempt: AutomaticRestore): Promise<boolean> {
+  if (!attempt.hasSession) return true;
+  for (const node of rig.nodes) {
+    const sessionId = attempt.launched.get(node.id);
+    const row = sessionId
+      ? db.prepare("SELECT session_name AS sessionName FROM sessions WHERE id = ?").get(sessionId) as { sessionName: string } | undefined
+      : undefined;
+    if (!row || !(await attempt.hasSession(row.sessionName))) return false;
+  }
+  return true;
+}
+
+/** Whether the finished attempt restored every seat and each still runs, and is bound to, the
+ *  session it launched. Synchronous, so a caller can check it after its last await. */
+function attemptStillRunning(db: Database.Database, rig: Rig, attempt: AutomaticRestore): boolean {
   const done = attempt.settled;
   if (!done?.ok || !done.result.ok || done.result.result.rigResult !== "fully_restored") return false;
-  for (const node of rig.nodes) {
+  return rig.nodes.every((node) => {
     const sessionId = attempt.launched.get(node.id);
     const row = sessionId ? db.prepare(
       `SELECT s.status, s.session_name AS sessionName, b.tmux_session AS bound FROM sessions s
         LEFT JOIN bindings b ON b.node_id = s.node_id WHERE s.id = ?`,
     ).get(sessionId) as { status: string; sessionName: string; bound: string | null } | undefined : undefined;
-    if (!row || row.status !== "running" || row.bound !== row.sessionName) return false;
-    if (attempt.hasSession && !(await attempt.hasSession(row.sessionName))) return false;
-  }
-  return true;
+    return !!row && row.status === "running" && row.bound === row.sessionName;
+  });
 }
 
 /** The outcome of daemon start's restore of this rig, for a request that asks for the same restore
@@ -191,17 +203,23 @@ export async function joinAutomaticRestore(
   const db = deps.snapshotRepo.db;
   const attempt = automaticRestore(db, rigId);
   const snapshot = attempt?.snapshotId ? deps.snapshotRepo.getSnapshot(attempt.snapshotId) : null;
-  const held = () => {
-    const rig = deps.rigRepo.getRig(rigId);
-    return rig && snapshot && attempt && seatsHeldByAttempt(db, rig, snapshot, attempt) ? rig : null;
+  if (!attempt || !snapshot) return null;
+  const rig = () => deps.rigRepo.getRig(rigId);
+  const held = (running: boolean) => {
+    const current = rig();
+    return !!current && seatsHeldByAttempt(db, current, snapshot, attempt, running);
   };
-  if (!attempt || !snapshot || !held()) return null;
-  if (attempt.settled) {
-    const rig = held()!;
-    return await attemptStillRunning(db, rig, attempt) && held() ? attempt.settled : null;
+  if (!attempt.settled) {
+    if (!held(true)) return null;
+    const outcome = await attempt.outcome;
+    return held(false) ? outcome : null;
   }
-  const outcome = await attempt.outcome;
-  return held() ? outcome : null;
+  const current = rig();
+  if (!current || !held(false) || !attemptStillRunning(db, current, attempt)) return null;
+  if (!(await attemptTerminalsPresent(db, current, attempt))) return null;
+  // The terminal check awaited: a stop or another occupant may have come meanwhile.
+  const after = rig();
+  return after && held(false) && attemptStillRunning(db, after, attempt) ? attempt.settled : null;
 }
 
 /** Restore an existing rig with no operator present (daemon start bringing back a lost kernel) and

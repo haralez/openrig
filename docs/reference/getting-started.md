@@ -199,8 +199,9 @@ still goes on to your other rigs but exits 1 (`kernelRestore.state: "failed"`),
 so `rig start && next` does not run `next`. A `rig down kernel` made during the
 restore waits for it to return and then stops the kernel, which stays down on
 later starts. A `rig up kernel --existing` with no other options, made during
-the restore or after it restored every seat, reports that restore's outcome
-instead of starting another; one with other options is not merged into it.
+the restore, or after it restored every seat while those seats still run the
+sessions it started, reports that restore's outcome instead of starting another;
+one with other options is not merged into it.
 
 Do not restart or recreate an
 existing kernel merely to open its view. The startup TUI (`rig`) offers its own
