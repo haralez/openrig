@@ -78,7 +78,7 @@ describe("managed Claude full down/up", () => {
           headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
           body: JSON.stringify({ eventFamily: "session_identity", hookEvent: "SessionStart", sessionName: name, nodeId: node.id,
             runtime: "claude-code", generation: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid,
-            source: timing.startsWith("clear") ? "clear" : "resume", resumeLaunch: launchMarker, hookPid: 111, sessionId: rotated }) });
+            source: timing.startsWith("clear") ? "clear" : "resume", resumeLaunch: launchMarker, resumeLaunchFirst: true, hookPid: 111, sessionId: rotated }) });
         expect(response.status).toBe(200);
         expect(await response.json()).toMatchObject({ tokenPersisted: true });
       };

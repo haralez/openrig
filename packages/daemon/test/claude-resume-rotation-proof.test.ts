@@ -5,6 +5,9 @@
 // after the first) keeps today's refusal.
 
 import { createRequire } from "node:module";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -165,6 +168,20 @@ describe("the relay forwards the evidence", () => {
     );
     expect(payload).toMatchObject({ eventFamily: "session_identity", sessionId: T2, source: "resume", generation: "gen-1", resumeLaunch: T1,
       hookPid: process.pid });
+  });
+
+  it("claims the launch's first SessionStart once, on disk, per launch token and generation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-relay-claim-"));
+    try {
+      expect(relay.claimFirstLaunchHook(T1, "gen-1", dir)).toBe(true);
+      // A later hook of the same launch (in-process /resume, a child) finds it claimed.
+      expect(relay.claimFirstLaunchHook(T1, "gen-1", dir)).toBe(false);
+      expect(relay.claimFirstLaunchHook(T1, "gen-2", dir)).toBe(true);
+      expect(relay.claimFirstLaunchHook(null, "gen-1", dir)).toBe(false);
+      expect(relay.claimFirstLaunchHook(T1, null, dir)).toBe(false);
+      // An unwritable record never reads as first.
+      expect(relay.claimFirstLaunchHook(T2, "gen-1", join(dir, "missing\0dir"))).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("sends nulls when the runtime or launch did not provide them", () => {

@@ -32,7 +32,7 @@ type Mode = "unchanged" | "rotation" | "duplicate-hook" | "delayed-hook" | "shim
 const sourcedModes = ["resume-rotation", "resume-then-clear", "clear-sourced", "startup-sourced",
   "compact-sourced", "resume-stale-generation", "resume-no-source",
   "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume",
-  "resume-child-missed-parent"] as const;
+  "resume-child-missed-parent", "resume-in-process-missed-first"] as const;
 type SourcedMode = typeof sourcedModes[number];
 const tokenOnlyModes = ["N1-settings-before", "settings-after", "plain-wrong-token", "lone-wrong-shim"] as const;
 
@@ -78,7 +78,7 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     });
     app.route("/api/activity", activityRoutes);
     const generation = registry.currentOccupantTenure(node.id)!.generationUuid;
-    const hook = async (token: string, occurredAt?: string, evidence: { source?: string; generation?: string; resumeLaunch?: string; hookPid?: number } = {}) => {
+    const hook = async (token: string, occurredAt?: string, evidence: { source?: string; generation?: string; resumeLaunch?: string; hookPid?: number; resumeLaunchFirst?: boolean } = {}) => {
       const response = await app.request("/api/activity/hooks", {
         method: "POST",
         headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
@@ -103,7 +103,13 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
       // resume-child-missed-parent: the launched process's own hook never reached the daemon; the
       // first one to arrive is the child's, with the inherited marker and generation.
       const hookPid = mode === "resume-after-launch-hook" || mode === "resume-child-missed-parent" ? 122 : 111;
-      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation, resumeLaunch, hookPid });
+      // The relay claims the launch's first SessionStart on disk before posting, so a later hook
+      // finds it claimed: resume-in-process-missed-first is the launched process's in-process /resume
+      // after its own first hook was lost in delivery. resume-child-missed-parent takes the worst
+      // case, a parent whose relay never ran, so the child claims first and only process binding
+      // refuses it.
+      const resumeLaunchFirst = !(mode === "resume-after-launch-hook" || mode === "resume-in-process-missed-first");
+      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation, resumeLaunch, hookPid, resumeLaunchFirst });
       if (mode === "resume-then-clear" || mode === "resume-clear-resume") await hook(third, undefined, { source: "clear", generation });
       if (mode === "resume-clear-resume") await hook(rotated, undefined, { source: "resume", generation, resumeLaunch });
     } else if (mode !== "unchanged" && !tokenOnly) {
@@ -255,7 +261,8 @@ describe("a resumed conversation that changed its id, with the hook's evidence (
   });
 
   it.each(["clear-sourced", "resume-then-clear", "startup-sourced", "compact-sourced", "resume-stale-generation", "resume-no-source",
-    "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume", "resume-child-missed-parent"] as const)(
+    "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume", "resume-child-missed-parent",
+    "resume-in-process-missed-first"] as const)(
     "%s keeps today's warning: the conversation is unverified", async mode => {
       const { result, calls, observed, strict } = await sendAfterHook(mode);
       expect(observed.state).toBe("unknown");

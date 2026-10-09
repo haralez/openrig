@@ -225,10 +225,12 @@ activityRoutes.post("/hooks", async (c) => {
     } catch { /* an unreadable ledger is no evidence */ }
     const source = stringOrNull(body.source);
     const resumeLaunch = stringOrNull(body.resumeLaunch);
-    // Only for a hook that could name the armed launch: was it sent by the process OpenRig launched?
+    // Only for a hook that could name the armed launch: was it the launch's first SessionStart (the
+    // relay records that locally, so a first hook lost in delivery still counts), and was it sent
+    // by the process OpenRig launched?
     let launchedProcess = false;
     const armed = runtime === "claude-code" && currentGeneration && source === "resume" && resumeLaunch
-      ? sessionRegistry.armedResumeLaunch(resolved.sessionId) : null;
+      && body.resumeLaunchFirst === true ? sessionRegistry.armedResumeLaunch(resolved.sessionId) : null;
     const hookPid = typeof body.hookPid === "number" && Number.isInteger(body.hookPid) && body.hookPid > 0 ? body.hookPid : null;
     const tmux = c.get("tmuxAdapter" as never) as { getPanePid(target: string): Promise<number | null> } | undefined;
     if (armed && armed === resumeLaunch?.trim() && hookPid && tmux) {
