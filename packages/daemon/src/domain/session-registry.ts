@@ -396,6 +396,32 @@ export class SessionRegistry {
     })();
   }
 
+  /** Record the token OpenRig launched this row with. A current-generation
+   *  `source: "resume"` hook can land before this write, while the row is still
+   *  empty, so it had no previous token to name; the launch is that token.
+   *  Fills only that gap and never displaces the hook's token. */
+  recordLaunchResumeToken(sessionId: string, type: string, token: string): boolean {
+    const normalized = token.trim();
+    if (!normalized) return false;
+    return this.db.transaction(() => {
+      if (this.updateResumeToken(sessionId, type, normalized, "scrape")) return true;
+      this.db.prepare(
+        "UPDATE sessions SET resume_rotated_from = ? WHERE id = ? AND resume_type = ? AND resume_provenance = 'hook' " +
+        "AND resume_source = 'resume' AND resume_rotated_from IS NULL AND resume_token <> ?",
+      ).run(normalized, sessionId, type, normalized);
+      return false;
+    })();
+  }
+
+  /** True when this row's hook-recorded resume rotation started from `token`. */
+  claudeResumeRotatedFrom(sessionId: string, token: string): boolean {
+    const row = this.db.prepare(
+      "SELECT resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE id = ? AND resume_type = 'claude_id'",
+    ).get(sessionId) as Parameters<typeof claudeRotatedFromToken>[0];
+    const from = claudeRotatedFromToken(row);
+    return !!from && from === token.trim();
+  }
+
   /** Test durable identity without returning the stored credential or changing
    *  its provenance. An equal protected token needs no lower-ranked write. */
   resumeTokenMatches(sessionId: string, type: string, token: string): boolean {

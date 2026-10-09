@@ -310,7 +310,7 @@ export class StartupOrchestrator {
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
-                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                this.sessionRegistry.recordLaunchResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
               } catch { /* best-effort */ }
             }
             break;
@@ -528,7 +528,9 @@ export class StartupOrchestrator {
     if (!input.skipHarnessLaunch && input.adapter.runtime === "claude-code"
       && continuityOutcome === "resumed" && input.resumeToken
       && ((input.resumeType !== undefined && !isClaudeResumeType(input.resumeType))
-        || !this.sessionRegistry.resumeTokenMatches(input.sessionId, "claude_id", input.resumeToken.trim()))) {
+        || !(this.sessionRegistry.resumeTokenMatches(input.sessionId, "claude_id", input.resumeToken.trim())
+          // Claude continued this resume under a new id; its current-generation hook said so.
+          || this.sessionRegistry.claudeResumeRotatedFrom(input.sessionId, input.resumeToken)))) {
       return this.fail(deliveryInput, "attention_required", [
         "Native resume was observed but its requested type or current session metadata conflicts or could not be retained; session preserved.",
       ]);

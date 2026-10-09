@@ -26,7 +26,7 @@ const T3 = "00000000-0000-4000-8000-000000001079";
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function seat() {
+function seat(opts: { launched?: boolean } = {}) {
   const db = createDb(); databases.push(db);
   migrate(db, ALL_MIGRATIONS);
   const rigRepo = new RigRepository(db), registry = new SessionRegistry(db);
@@ -34,7 +34,7 @@ function seat() {
   const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
   const session = registry.registerSession(node.id, "dev-impl@rotation");
   // The launch records the token it resumed (startup-orchestrator, provenance scrape).
-  registry.updateResumeToken(session.id, "claude_id", T1, "scrape");
+  if (opts.launched !== false) registry.updateResumeToken(session.id, "claude_id", T1, "scrape");
   const generation = registry.currentOccupantTenure(node.id)!.generationUuid;
   const row = () => db.prepare(
     "SELECT resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE id = ?",
@@ -104,6 +104,54 @@ describe("recording how a Claude session began", () => {
     s.registry.updateResumeToken(s.session.id, "claude_id", T1, "operator");
     expect(s.hook(T2, "resume")).toBe(false);
     expect(s.row()).toMatchObject({ resume_token: T1, resume_source: null, resume_rotated_from: null });
+  });
+});
+
+describe("a resume hook that lands before the launch records its token", () => {
+  // Claude's SessionStart can fire while the launch is still settling, before startup-orchestrator
+  // writes T1. The row is empty then, so the hook has no previous token to name; the launch does.
+  it("the launch write names the token the resume replaced", () => {
+    const s = seat({ launched: false });
+    s.hook(T2, "resume");
+    expect(s.row()).toMatchObject({ resume_token: T2, resume_source: "resume", resume_rotated_from: null });
+    expect(s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1)).toBe(false);
+    expect(s.row()).toEqual({ resume_token: T2, resume_provenance: "hook", resume_source: "resume", resume_rotated_from: T1 });
+    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(true);
+  });
+
+  it.each(["clear", "startup", "compact", null])("an early hook with source %s gets no launch token", (source) => {
+    const s = seat({ launched: false });
+    s.hook(T2, source);
+    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1);
+    expect(s.row()).toMatchObject({ resume_token: T2, resume_rotated_from: null });
+    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(false);
+  });
+
+  it("an early hook for a stale generation gets no launch token", () => {
+    const s = seat({ launched: false });
+    s.hook(T2, "resume", false);
+    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1);
+    expect(claudeRotatedFromToken(s.row())).toBeNull();
+  });
+
+  it("an early resume hook that kept the id needs no rotation", () => {
+    const s = seat({ launched: false });
+    s.hook(T1, "resume");
+    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1);
+    expect(s.row()).toMatchObject({ resume_token: T1, resume_rotated_from: null });
+  });
+
+  it("never overwrites a rotation the hook already recorded", () => {
+    const s = seat();
+    s.hook(T2, "resume");
+    s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T3);
+    expect(s.row()).toMatchObject({ resume_token: T2, resume_rotated_from: T1 });
+  });
+
+  it("with no hook yet it is the ordinary launch write", () => {
+    const s = seat({ launched: false });
+    expect(s.registry.recordLaunchResumeToken(s.session.id, "claude_id", T1)).toBe(true);
+    expect(s.row()).toMatchObject({ resume_token: T1, resume_provenance: "scrape", resume_rotated_from: null });
   });
 });
 

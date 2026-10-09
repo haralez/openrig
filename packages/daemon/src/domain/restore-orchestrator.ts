@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { claudeRotatedFromToken, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
@@ -1373,6 +1373,8 @@ export class RestoreOrchestrator {
       // join; a hook/operator may have changed it meanwhile. Never backfill here.
       const retained = sameSession && (managedClaudeResume
         ? this.sessionRegistry.resumeTokenMatches(sessionId, "claude_id", resumeToken)
+          // Claude continued the resumed conversation under a new id (its hook said so).
+          || this.sessionRegistry.claudeResumeRotatedFrom(sessionId, resumeToken)
         : current.resume_token === resumeToken
           || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, node.runtime === "codex" ? "codex_id" : "claude_id", resumeToken, "scrape")));
       if (!retained) {
@@ -1659,12 +1661,15 @@ export class RestoreOrchestrator {
     }
 
     const sessRow = this.db.prepare(
-      "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
+      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_source, resume_rotated_from FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_source: string | null; resume_rotated_from: string | null } | undefined;
     if (!sessRow || sessRow.session_name !== sessionName) {
       return { ok: false, code: "binding_mismatch", detail: `Canonical binding ${sessionName} does not match the latest session row.` };
     }
-    const expectedResumeToken = sessRow.resume_token;
+    // argv carries the launch token. When Claude's hook recorded that this row's resume continued
+    // under a new id, the launch token is the one argv must match, exactly as before.
+    const expectedResumeToken = (sessRow.resume_type === "claude_id" ? claudeRotatedFromToken(sessRow) : null)
+      ?? sessRow.resume_token;
     if (!expectedResumeToken) {
       return { ok: false, code: "resume_token_not_used", detail: "No resume token recorded on the latest session row." };
     }

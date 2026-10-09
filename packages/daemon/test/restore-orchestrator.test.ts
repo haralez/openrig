@@ -3299,6 +3299,26 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
     });
 
+    // #1077 — the seat launched with --resume tok-abc-123 and Claude continued as a new id. The
+    // strict reconciler still demands exact argv lineage, against the launch token the hook named.
+    it.each([
+      ["resume", true],
+      ["clear", false],
+    ] as const)("matches argv to the launch token a recorded Claude resume replaced (source %s)", async (source, accepted) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("sh");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("Claude Code v2.1.220\n ❯ accept edits on");
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+      const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(seeded.nodeId) as { id: string };
+      sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true });
+      const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows("tok-abc-123") }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(result.ok).toBe(accepted);
+      if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
     it("reconciles a headerless Claude prompt when exact resume-token lineage is verified", async () => {
       const tmux = mockTmuxForReconciler();
       vi.mocked(tmux.hasSession).mockResolvedValue(true);
