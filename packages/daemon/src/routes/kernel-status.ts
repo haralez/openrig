@@ -39,6 +39,8 @@ kernelStatusRoutes.get("/status", (c) => {
       session_name: a.sessionName,
       runtime: a.runtime,
       startup_status: a.startupStatus,
+      // The seat's newest session is detached or exited: its startup_status is history.
+      ...(a.down ? { down: true } : {}),
     })),
     first_unready_since: status.firstUnreadySince,
     variant: status.variant,

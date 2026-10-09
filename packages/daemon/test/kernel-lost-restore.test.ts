@@ -3,12 +3,14 @@
 // the real teardown and the real startup reconciler against a real database, then boot the kernel
 // the way daemon start does, with the restore itself stubbed.
 
+import { Hono } from "hono";
+import { kernelStatusRoutes } from "../src/routes/kernel-status.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -33,7 +35,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function host() {
+function host(claimed = false) {
   const db = createFullTestDb(); dbs.push(db);
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -55,7 +57,7 @@ function host() {
   const nodes = SEATS.map((logicalId) => {
     const node = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", podId: "kernel-pod" });
     const name = `${logicalId.replace(".", "-")}@kernel`;
-    const session = sessionRegistry.registerSession(node.id, name);
+    const session = claimed ? sessionRegistry.registerClaimedSession(node.id, name) : sessionRegistry.registerSession(node.id, name);
     sessionRegistry.updateStatus(session.id, "running");
     sessionRegistry.updateStartupStatus(session.id, "ready");
     sessionRegistry.updateBinding(node.id, { tmuxSession: name });
@@ -94,7 +96,7 @@ function host() {
   const statuses = () => (db.prepare(
     "SELECT status FROM sessions WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?) ORDER BY created_at, id",
   ).all(rig.id) as Array<{ status: string }>).map((row) => row.status);
-  return { db, rigRepo, sessionRegistry, snapshotRepo, snapshotCapture, rig, nodes, live, reboot, down, reconcile, daemonStart, statuses, bootstrap };
+  return { db, rigRepo, sessionRegistry, eventBus, tmux, snapshotRepo, snapshotCapture, rig, nodes, live, reboot, down, reconcile, daemonStart, statuses, bootstrap };
 }
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -200,6 +202,7 @@ describe("classifyManagedKernel", () => {
     for (const { node, name } of h.nodes) {
       const next = h.sessionRegistry.registerSession(node.id, name);
       h.sessionRegistry.updateStatus(next.id, "detached");
+      h.sessionRegistry.updateBinding(node.id, { tmuxSession: name });
     }
     const managed = classifyManagedKernel(h.rigRepo, h.sessionRegistry);
     expect(managed.kind).toBe("lost");
@@ -262,5 +265,51 @@ describe("restoreExistingRigUnattended", () => {
       rigRepo: h.rigRepo, snapshotRepo: h.snapshotRepo, snapshotCapture: h.snapshotCapture,
     }, "no-such-rig", () => false);
     expect(errors).toEqual({ errors: ["Rig no-such-rig not found"] });
+  });
+});
+
+// Boundaries from dev-review's review of ed95ff48.
+describe("existing-kernel boundaries", () => {
+  it("does not auto-restore intentionally unclaimed seats", async () => {
+    const h = host(true);
+    const setup = createTestApp(h.db, { tmux: h.tmux });
+    for (const { name } of h.nodes) {
+      const released = await setup.rigLifecycleService.unclaimSession(name);
+      expect(released.ok).toBe(true);
+    }
+    expect(h.live.size).toBe(2);
+    expect(h.statuses()).toEqual(["detached", "detached"]);
+    expect(h.rigRepo.getRig(h.rig.id)!.nodes.every(node => node.binding === null)).toBe(true);
+    const restore = vi.fn(async () => ({ errors: [] }));
+    const tracker = await h.daemonStart(restore);
+    tracker.stop();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("a missing kernel seat does not project full readiness", async () => {
+    const h = host();
+    h.rigRepo.addNode(h.rig.id, "kernel.queue", { runtime: "claude-code", podId: "kernel-pod" });
+    const restore = vi.fn(async () => ({ errors: [] }));
+    const tracker = await h.daemonStart(restore);
+    tracker.stop();
+    expect(restore).not.toHaveBeenCalled();
+    expect(tracker.getStatus().kernelState).not.toBe("ready");
+  });
+});
+
+describe("kernel status public response", () => {
+  it("preserves the down flag for a gone seat", async () => {
+    const h = host();
+    h.live.delete(h.nodes[0]!.name);
+    const tracker = await h.daemonStart(vi.fn(async () => ({ errors: [] })));
+    const app = new Hono();
+    app.use("*", async (c,next) => { c.set("kernelBootTracker" as never, tracker as never); await next(); });
+    app.route("/api/kernel", kernelStatusRoutes);
+    const response = await app.request("/api/kernel/status");
+    const body = await response.json();
+    tracker.stop();
+    expect(body).toMatchObject({ kernel_state: "partial_ready", agents: expect.arrayContaining([
+      expect.objectContaining({ session_name: h.nodes[0]!.name, down: true }),
+    ]) });
   });
 });

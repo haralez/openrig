@@ -167,7 +167,9 @@ export class KernelBootTracker {
       kernelState = this.aggregateReadinessFromAgents(agents);
     } else if (state === "skipped" && this.managedKernelLive) {
       const aggregated = this.aggregateReadinessFromAgents(agents);
-      if (aggregated === "ready" || aggregated === "partial_ready") kernelState = aggregated;
+      // agents[] lists seats with a session; a declared seat that never launched keeps it partial.
+      if (aggregated === "ready") kernelState = this.everyKernelNodeHasSession() ? "ready" : "partial_ready";
+      else if (aggregated === "partial_ready") kernelState = aggregated;
     } else if (
       (state === "bootstrap_failed" || state === "degraded")
       && !this.bootstrapInFlight
@@ -283,6 +285,19 @@ export class KernelBootTracker {
       }
     }
     return latestByNode;
+  }
+
+  /** False when a current kernel node has no session at all, and on any read error. */
+  private everyKernelNodeHasSession(): boolean {
+    try {
+      for (const rig of this.deps.rigRepo.findUnarchivedRigsByName("kernel")) {
+        const latest = this.latestSessionByNode(rig.id);
+        if ((this.deps.rigRepo.getRig(rig.id)?.nodes ?? []).some((node) => !latest.has(node.id))) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** True only when every kernel node's newest session is ready and every expected seat has such a

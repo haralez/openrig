@@ -174,7 +174,8 @@ export type ManagedKernel =
 
 /** What startup reconcile left of the existing kernel rig, from each seat's newest session:
  *  - live: some seat is still running;
- *  - lost: every seat is detached, which reconcile does to a seat whose tmux session is gone;
+ *  - lost: every seat is detached, which reconcile does to a seat whose tmux session is gone, and
+ *    still bound to that session (an unclaimed seat is detached too, but its binding is cleared);
  *  - stopped: some seat was stopped on purpose (`rig down kernel` or a seat stop marks it exited);
  *  - unknown: anything else, including more than one current kernel rig or a seat with no session.
  *  Only `lost` is restored, so a deliberate stop survives daemon restarts. */
@@ -185,7 +186,7 @@ export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: S
     const rigId = rigs[0]!.id;
     const nodes = rigRepo.getRig(rigId)?.nodes ?? [];
     if (nodes.length === 0) return { kind: "unknown" };
-    const latest = new Map<string, { status: string; createdAt: string; id: string }>();
+    const latest = new Map<string, { status: string; createdAt: string; id: string; sessionName: string }>();
     for (const session of sessionRegistry.getSessionsForRig(rigId)) {
       const prior = latest.get(session.nodeId);
       if (!prior || session.createdAt > prior.createdAt || (session.createdAt === prior.createdAt && session.id > prior.id)) {
@@ -195,7 +196,14 @@ export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: S
     const statuses = nodes.map((node) => latest.get(node.id)?.status ?? null);
     const seats = nodes.map((node) => node.logicalId);
     if (statuses.some((status) => status === "running")) return { kind: "live", rigId, seats };
-    if (statuses.every((status) => status === "detached")) return { kind: "lost", rigId, seats };
+    // Reconcile leaves a lost seat's binding in place; unclaiming a seat (which also marks it
+    // detached) clears it and releases ownership. Only seats still bound to their newest session are
+    // the daemon's to bring back.
+    const stillBound = nodes.every((node) => {
+      const session = latest.get(node.id);
+      return !!session && sessionRegistry.getBindingForNode(node.id)?.tmuxSession === session.sessionName;
+    });
+    if (statuses.every((status) => status === "detached") && stillBound) return { kind: "lost", rigId, seats };
     if (statuses.some((status) => status === "exited")) return { kind: "stopped" };
     return { kind: "unknown" };
   } catch {
