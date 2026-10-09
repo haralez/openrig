@@ -8,7 +8,7 @@
 //
 // Returns one of two shapes:
 //
-//   200 { kernel_state, agents[], first_unready_since, variant, detail, last_boot_failure }
+//   200 { kernel_state, agents[], first_unready_since, variant, detail, last_boot_failure, existing_restore? }
 //     — when the tracker is wired (the standard daemon composition).
 //
 //   503 { error: 'kernel_boot_tracker_unavailable', message: ... }
@@ -47,5 +47,8 @@ kernelStatusRoutes.get("/status", (c) => {
     detail: status.detail,
     // A boot failure the kernel has recovered from; kernel_state then reads ready.
     last_boot_failure: status.lastBootFailure,
+    // The boot is the restore of an existing kernel, not a first boot ("in_progress" | "finished"):
+    // `rig start` goes on to the other rigs whatever it reports.
+    ...(status.existingRestore ? { existing_restore: status.existingRestore } : {}),
   });
 });

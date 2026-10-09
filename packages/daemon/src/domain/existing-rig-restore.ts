@@ -91,20 +91,45 @@ export async function runExistingRigRestore(
   return { snapshot, capturedCurrentState, result };
 }
 
+export type ExistingRigRestoreOutcome =
+  | { ok: false; choice: Extract<RestoreSnapshotChoice, { ok: false }> }
+  | ({ ok: true; staleSnapshot: boolean } & Awaited<ReturnType<typeof runExistingRigRestore>>);
+
+// The unattended restore running for each rig, per database: an equivalent `rig up <rig> --existing`
+// that arrives meanwhile waits for it instead of starting a second one.
+const unattendedRestores = new WeakMap<object, Map<string, Promise<ExistingRigRestoreOutcome>>>();
+
+/** The unattended restore now running for this rig, if any. */
+export function unattendedRestoreInProgress(deps: ExistingRigRestoreDeps, rigId: string): Promise<ExistingRigRestoreOutcome> | null {
+  return unattendedRestores.get(deps.snapshotRepo.db)?.get(rigId) ?? null;
+}
+
 /** Restore an existing rig with no operator present (daemon start bringing back a lost kernel) and
  *  reduce the outcome to the errors that kept it from restoring. A partial restore is not a
  *  failure: the seats' own status then decides ready or partial_ready. */
-export async function restoreExistingRigUnattended(
+export function restoreExistingRigUnattended(
   deps: ExistingRigRestoreDeps,
   rigId: string,
   exists: (path: string) => boolean,
 ): Promise<{ errors: string[] }> {
-  const choice = chooseRestoreSnapshot(deps, rigId);
-  if (!choice.ok) return { errors: [choice.body.error] };
-  const { result } = await runExistingRigRestore(deps, choice, { exists });
-  if (!result.ok) return { errors: [result.message] };
-  const { rigResult, nodes } = result.result;
-  if (rigResult !== "failed" && rigResult !== "not_attempted") return { errors: [] };
-  const nodeErrors = nodes.filter((node) => node.error).map((node) => `${node.logicalId}: ${node.error}`);
-  return { errors: nodeErrors.length > 0 ? nodeErrors : [`restore ${rigResult}`] };
+  const outcome = (async (): Promise<ExistingRigRestoreOutcome> => {
+    const choice = chooseRestoreSnapshot(deps, rigId);
+    if (!choice.ok) return { ok: false, choice };
+    return { ok: true, staleSnapshot: choice.staleSnapshot, ...await runExistingRigRestore(deps, choice, { exists }) };
+  })();
+  const db = deps.snapshotRepo.db;
+  const running = unattendedRestores.get(db) ?? new Map<string, Promise<ExistingRigRestoreOutcome>>();
+  unattendedRestores.set(db, running);
+  running.set(rigId, outcome);
+  const settle = () => { if (running.get(rigId) === outcome) running.delete(rigId); };
+  outcome.then(settle, settle);
+  return outcome.then((done) => {
+    if (!done.ok) return { errors: [done.choice.body.error] };
+    const { result } = done;
+    if (!result.ok) return { errors: [result.message] };
+    const { rigResult, nodes } = result.result;
+    if (rigResult !== "failed" && rigResult !== "not_attempted") return { errors: [] };
+    const nodeErrors = nodes.filter((node) => node.error).map((node) => `${node.logicalId}: ${node.error}`);
+    return { errors: nodeErrors.length > 0 ? nodeErrors : [`restore ${rigResult}`] };
+  });
 }

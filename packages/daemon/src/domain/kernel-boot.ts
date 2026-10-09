@@ -106,7 +106,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
       // Startup reconcile found none of its seats running and marked them detached: a reboot or
       // crash took it down, not `rig down` (which marks them exited). Bring it back as it was.
       log("info", "kernel-boot: kernel rig was lost (all seats detached); restoring it");
-      tracker.startBooting(null, deps.restoreLostKernel(managed.rigId), managed.seats);
+      tracker.startBooting(null, deps.restoreLostKernel(managed.rigId), managed.seats, { existingRestore: true });
       return tracker;
     }
     log("info", `kernel-boot: kernel rig already managed (${managed.kind}); skipping builtin boot`);

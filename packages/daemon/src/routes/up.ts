@@ -9,7 +9,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
-import { chooseRestoreSnapshot, runExistingRigRestore } from "../domain/existing-rig-restore.js";
+import { chooseRestoreSnapshot, runExistingRigRestore, unattendedRestoreInProgress, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
 import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
@@ -97,9 +97,16 @@ function getDeps(c: { get: (key: string) => unknown }) {
  */
 async function restoreByRigId(rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>, c: { json: (data: unknown, status?: number) => Response }, freshLogicalIds?: string[], plan?: boolean, nonInterruptive?: boolean) {
   const { snapshotRepo } = deps;
+  // Daemon start is already restoring this rig (a kernel a reboot left down). A request for the same
+  // restore waits for that one and reports its outcome: no second launch and no snapshot of its own.
+  // One that asks for something else (--fresh seats, a non-interruptive choice) is not merged.
+  if (!plan && !freshLogicalIds?.length && nonInterruptive === undefined) {
+    const running = unattendedRestoreInProgress(deps, rigId);
+    if (running) return renderExistingRestore(rigId, rigName, deps, c, await running, true);
+  }
   const choice = chooseRestoreSnapshot(deps, rigId);
   if (!choice.ok) return c.json(choice.body, choice.status);
-  const { rig, staleSnapshot } = choice;
+  const { rig } = choice;
 
   // OPR.0.3.4.4 — read-only plan gate, BEFORE any restore mutation. The
   // rig_name path previously early-returned past the bootstrap plan gate, so
@@ -112,11 +119,21 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   }
 
   const fs = await import("node:fs");
-  const { snapshot, capturedCurrentState, result } = await runExistingRigRestore(deps, choice, {
+  const run = await runExistingRigRestore(deps, choice, {
     freshLogicalIds,
     nonInterruptive,
     exists: (p: string) => fs.existsSync(p),
   });
+  return renderExistingRestore(rigId, rigName, deps, c, { ok: true, staleSnapshot: choice.staleSnapshot, ...run }, false);
+}
+
+async function renderExistingRestore(
+  rigId: string, rigName: string | null, deps: ReturnType<typeof getDeps>,
+  c: { json: (data: unknown, status?: number) => Response }, outcome: ExistingRigRestoreOutcome, joined: boolean,
+) {
+  if (!outcome.ok) return c.json(outcome.choice.body, outcome.choice.status);
+  const { snapshot, capturedCurrentState, result, staleSnapshot } = outcome;
+  const joinedWarning = joined ? ["Daemon start was already restoring this rig; this is that restore's outcome, and no second restore was started."] : [];
   if (!result.ok && result.code === "restore_unavailable") {
     return c.json({ error: result.message }, 500);
   }
@@ -133,7 +150,7 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
         remediation: result.result.blockers?.map((blocker) => blocker.remediation) ?? [],
       }, 409);
     }
-    return c.json({ error: result.message, code: result.code }, result.code === "rig_not_stopped" ? 409 : 400);
+    return c.json({ error: result.message, code: result.code, ...(joined ? { warnings: joinedWarning } : {}) }, result.code === "rig_not_stopped" ? 409 : 400);
   }
 
   // Compute attach command from first running node (same logic as /api/rigs/:id/up)
@@ -150,11 +167,11 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     snapshotKind: snapshot.kind,
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
-    warnings: capturedCurrentState
+    warnings: [...joinedWarning, ...(capturedCurrentState
       ? [staleSnapshot
           ? "Existing restore snapshots named an older occupant; captured current DB state as auto-rehydrate snapshot for reboot recovery."
           : "No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
-      : result.result.warnings,
+      : result.result.warnings)],
     attachCommand,
   }, 200);
 }

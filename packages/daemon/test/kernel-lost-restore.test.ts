@@ -130,6 +130,40 @@ describe("daemon start with an existing kernel rig", () => {
     expect(h.statuses()).toEqual(["exited", "exited"]);
   });
 
+  // `rig down kernel` on a kernel startup already marked detached reports it already stopped; it
+  // must still count as the request to keep it down.
+  it.each(["a failed automatic restore", "a --no-kernel start", "a start without the restore wired"] as const)(
+    "`rig down kernel` after a reboot and %s keeps the next start skipped", async (before) => {
+      const h = host();
+      h.reboot();
+      if (before === "a --no-kernel start") process.env.OPENRIG_NO_KERNEL = "1";
+      const failed = vi.fn(async () => ({ errors: ["restore failed"] }));
+      await h.daemonStart(before === "a failed automatic restore" ? failed : undefined);
+      await flush();
+      delete process.env.OPENRIG_NO_KERNEL;
+      expect(h.statuses()).toEqual(["detached", "detached"]);
+      const down = await h.down();
+      expect(down).toMatchObject({ alreadyStopped: true, errors: [] });
+      expect(h.statuses()).toEqual(["exited", "exited"]);
+      for (const { node } of h.nodes) expect(h.sessionRegistry.getBindingForNode(node.id)).toBeNull();
+      const restore = vi.fn(async () => ({ errors: [] }));
+      const tracker = await h.daemonStart(restore);
+      expect(tracker.getStatus()).toMatchObject({ kernelState: "skipped", detail: "kernel rig already managed" });
+      expect(restore).not.toHaveBeenCalled();
+    });
+
+  it("`rig down` leaves an unclaimed detached seat and older rows as they are", async () => {
+    const h = host();
+    h.reboot();
+    await h.reconcile();
+    // Unclaim releases the operator's seat: detached with no binding. The advisor stays lost.
+    const [operator, advisor] = h.nodes;
+    h.sessionRegistry.clearBinding(operator!.node.id);
+    await h.down();
+    expect(h.statuses()).toEqual(["detached", "exited"]);
+    expect(h.sessionRegistry.getBindingForNode(advisor!.node.id)).toBeNull();
+  });
+
   it("OPENRIG_NO_KERNEL=1 never restores one", async () => {
     const h = host();
     h.reboot();
@@ -311,5 +345,46 @@ describe("kernel status public response", () => {
     expect(body).toMatchObject({ kernel_state: "partial_ready", agents: expect.arrayContaining([
       expect.objectContaining({ session_name: h.nodes[0]!.name, down: true }),
     ]) });
+  });
+});
+
+describe("a seat whose newest session was superseded", () => {
+  it("reads down, so the kernel is not ready with nothing running", async () => {
+    const h = host();
+    const tracker = await h.daemonStart(vi.fn(async () => ({ errors: [] })));
+    expect(tracker.getStatus().kernelState).toBe("ready");
+    const rolledBack = h.sessionRegistry.registerSession(h.nodes[0]!.node.id, h.nodes[0]!.name);
+    h.sessionRegistry.updateStartupStatus(rolledBack.id, "ready");
+    h.sessionRegistry.updateStatus(rolledBack.id, "superseded");
+    const status = tracker.getStatus();
+    tracker.stop();
+    expect(status.kernelState).toBe("partial_ready");
+    expect(status.agents.find((agent) => agent.sessionName === h.nodes[0]!.name)).toMatchObject({ down: true });
+  });
+});
+
+describe("kernel status names an existing-kernel restore", () => {
+  const status = async (tracker: Awaited<ReturnType<ReturnType<typeof host>["daemonStart"]>>) => {
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("kernelBootTracker" as never, tracker as never); await next(); });
+    app.route("/api/kernel", kernelStatusRoutes);
+    return (await app.request("/api/kernel/status")).json();
+  };
+
+  it("in progress while the restore runs, finished once it returns, and absent on any other boot", async () => {
+    const h = host();
+    h.reboot();
+    let finish!: (result: { errors: string[] }) => void;
+    const tracker = await h.daemonStart(() => new Promise((resolve) => { finish = resolve; }));
+    expect(await status(tracker)).toMatchObject({ kernel_state: "booting", existing_restore: "in_progress" });
+    finish({ errors: ["restore failed"] });
+    await flush();
+    expect(await status(tracker)).toMatchObject({ kernel_state: "bootstrap_failed", existing_restore: "finished" });
+    tracker.stop();
+
+    const running = host();
+    const live = await running.daemonStart(vi.fn(async () => ({ errors: [] })));
+    expect(await status(live)).not.toHaveProperty("existing_restore");
+    live.stop();
   });
 });

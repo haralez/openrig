@@ -48,7 +48,8 @@ export interface KernelAgentStatus {
 
 /** Reconcile marks a session whose tmux session is gone `detached`; teardown marks it `exited`. */
 function isDownSession(session: Pick<Session, "status">): boolean {
-  return session.status === "detached" || session.status === "exited";
+  // superseded: a launch restore rolled back. Like detached and exited, nothing of it is running.
+  return session.status === "detached" || session.status === "exited" || session.status === "superseded";
 }
 
 export interface KernelBootStatus {
@@ -67,6 +68,9 @@ export interface KernelBootStatus {
    *  kernelState is ready and this keeps the failure as history. null otherwise, including while
    *  the failure is still current. */
   lastBootFailure: { state: "bootstrap_failed" | "degraded"; detail: string | null; at: string | null } | null;
+  /** The boot is the restore of an existing kernel a reboot or crash left down, not a first boot:
+   *  whether that restore is still running or has returned. null for any other boot. */
+  existingRestore: "in_progress" | "finished" | null;
 }
 
 export interface KernelBootTrackerDeps {
@@ -94,6 +98,7 @@ export class KernelBootTracker {
   private degradedEmitted = false;
   private bootstrapInFlight = false;
   private managedKernelLive = false;
+  private existingRestore = false;
 
   constructor(private readonly deps: KernelBootTrackerDeps) {}
 
@@ -137,9 +142,11 @@ export class KernelBootTracker {
     variant: string | null,
     bootstrapPromise: Promise<Pick<BootstrapResult, "errors">>,
     expectedSeats?: readonly string[] | null,
+    opts: { existingRestore?: boolean } = {},
   ): void {
     if (this.bootstrapInFlight) return;
     this.bootstrapInFlight = true;
+    this.existingRestore = opts.existingRestore === true;
     this.state = "booting";
     this.variant = variant;
     this.detail = null;
@@ -192,6 +199,7 @@ export class KernelBootTracker {
       variant: this.variant,
       detail: lastBootFailure ? null : this.detail,
       lastBootFailure,
+      existingRestore: this.existingRestore ? (this.bootstrapInFlight ? "in_progress" : "finished") : null,
     };
   }
 

@@ -10,7 +10,7 @@ import { restoreExistingRigUnattended } from "../src/domain/existing-rig-restore
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 describe("real automatic kernel restore and manual-up race", () => {
-  it.each(["auto-first", "manual-first", "auto-rehydrate"])("restores once: %s", async mode => {
+  it.each(["auto-first", "manual-first", "auto-rehydrate", "auto-first-fresh"])("restores once: %s", async mode => {
     const db = createFullTestDb();
     const name = "operator-agent@kernel", token = "00000000-0000-4000-8000-000000001078";
     const live = new Set([name]);
@@ -64,7 +64,7 @@ describe("real automatic kernel restore and manual-up race", () => {
       restoreLostKernel: rigId => automatic = restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator,
         runtimeAdapters: { "claude-code": adapter } as never }, rigId, () => true),
     });
-    const up = () => app.request("/api/up", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceRef: "kernel" }) });
+    const up = (extra: Record<string, unknown> = {}) => app.request("/api/up", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceRef: "kernel", ...extra }) });
     let tracker;
     try {
       if (mode === "manual-first") {
@@ -81,12 +81,26 @@ describe("real automatic kernel restore and manual-up race", () => {
         tracker = await boot();
         expect(tracker.getStatus().kernelState).toBe("booting");
         await atLaunch;
-        if (mode === "auto-first") {
-          const collision = await up();
+        if (mode === "auto-first-fresh") {
+          // A request for a different restore is not merged into the running one.
+          const collision = await up({ freshLogicalIds: ["operator.agent"] });
           expect(collision.status).toBe(400);
           expect(await collision.json()).toMatchObject({ code: "restore_in_progress" });
+          release();
+        } else {
+          // The same restore, asked for by hand: it waits for the running one instead of colliding.
+          let settled = false;
+          const manual = up().then((response) => { settled = true; return response; });
+          await new Promise<void>(r => setTimeout(r, 20));
+          expect(settled).toBe(false);
+          release();
+          const response = await manual;
+          const body = await response.json();
+          expect(response.status, JSON.stringify(body)).toBe(200);
+          expect(body).toMatchObject({ status: "restored", rigResult: "fully_restored" });
+          expect(body.warnings[0]).toContain("no second restore was started");
+          expect(JSON.stringify(body)).not.toMatch(/rig down|guard_target_changed|rig_not_stopped/);
         }
-        release();
         expect(await automatic).toEqual({ errors: [] });
       }
       await new Promise<void>(r => setImmediate(r));

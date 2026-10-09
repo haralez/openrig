@@ -169,6 +169,7 @@ import type { NotificationAdapter } from "./domain/mission-control/notification-
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
+import { restoreExistingRigUnattended } from "./domain/existing-rig-restore.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -1063,10 +1064,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       cwdOverride: runtimeSettings.workspaceRoot,
       degradedTimeoutMs,
       // A kernel a reboot left down comes back the way `rig up kernel --existing` brings it back.
-      restoreLostKernel: async (rigId) => {
-        const { restoreExistingRigUnattended } = await import("./domain/existing-rig-restore.js");
-        return restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters }, rigId, (p) => fs.existsSync(p));
-      },
+      // Synchronous, so the restore is registered before any request can ask for the same one.
+      restoreLostKernel: (rigId) =>
+        restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters }, rigId, (p) => fs.existsSync(p)),
     });
     try {
       // eslint-disable-next-line no-console
