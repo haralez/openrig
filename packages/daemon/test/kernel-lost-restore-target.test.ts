@@ -1,7 +1,7 @@
-// #1078 — boundaries of a manual `rig up kernel --existing` while daemon start restores the kernel:
-// non-interruptive choices and plans are not merged, a failed automatic restore is reported as such,
-// and a request made after an operator corrected a seat's token (a changed current target) takes
-// the ordinary path instead of joining. Contributed by dev-review in its review of bc72e6bf.
+// #1078 — a manual `rig up kernel --existing` while daemon start restores the kernel joins it only
+// for the same target: after an operator corrects the running seat's token and a new snapshot is
+// captured, the request is not merged; the same token with a new snapshot still joins. Contributed
+// by dev-review in its review of 0bd8f934.
 
 import { describe, it, expect, vi } from "vitest";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -11,7 +11,7 @@ import { restoreExistingRigUnattended, chooseRestoreSnapshot } from "../src/doma
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 describe("real automatic kernel restore and manual-up race", () => {
-  it.each(["auto-first-nonintr-true", "auto-first-nonintr-false", "auto-first-plan", "auto-failed", "auto-occupant-changed"])("restores once: %s", async mode => {
+  it.each(["same-target-snapshot", "changed-target-snapshot"])("restores once: %s", async mode => {
     const db = createFullTestDb();
     const name = "operator-agent@kernel", token = "00000000-0000-4000-8000-000000001078";
     const live = new Set([name]);
@@ -27,7 +27,7 @@ describe("real automatic kernel restore and manual-up race", () => {
       getPanePid: vi.fn(async () => 100),
       getPaneCommand: vi.fn(async () => "sh"),
       capturePaneContent: vi.fn(async () => "Claude Code\n❯ accept edits on"),
-      createSession: vi.fn(async (n: string) => { if(mode!=="auto-occupant-changed") { entered(); await launchGate; } if(mode === "auto-failed") return {ok:false,error:"fixture launch refused"}; live.add(n); return { ok: true }; }),
+      createSession: vi.fn(async (n: string) => { if(!mode.endsWith("-snapshot")) { entered(); await launchGate; } if(mode === "auto-failed") return {ok:false,error:"fixture launch refused"}; live.add(n); return { ok: true }; }),
       killSession: vi.fn(async (n: string) => { live.delete(n); return { ok: true }; }),
       setSessionOption: vi.fn(async () => ({ ok: true })),
       sendText: vi.fn(async () => ({ ok: true })),
@@ -41,7 +41,7 @@ describe("real automatic kernel restore and manual-up race", () => {
       runtime: "claude-code",
       project: async () => ({ applied: [], skipped: [], failed: [] }),
       deliverStartup: async () => ({ delivered: [], skipped: [], failed: [] }),
-      launchHarness: async () => { if(mode==="auto-occupant-changed") {entered(); await launchGate;} return { ok: true, resumeType: "claude_id", resumeToken: token }; },
+      launchHarness: async () => { if(mode.endsWith("-snapshot")) {entered(); await launchGate;} return { ok: true, resumeType: "claude_id", resumeToken: token }; },
       checkReady: async () => ({ ready: true }),
     };
     const setup = createTestApp(db, { tmux, listProcesses, adapters: { "claude-code": adapter } as never });
@@ -82,14 +82,17 @@ describe("real automatic kernel restore and manual-up race", () => {
         tracker = await boot();
         expect(tracker.getStatus().kernelState).toBe("booting");
         await atLaunch;
-        if (mode === "auto-occupant-changed") {
+        if (mode.endsWith("-snapshot")) {
           // The operator corrects the target token while automatic launch awaits I/O.
           const corrected = await app.request(`/api/sessions/${encodeURIComponent(name)}/resume-token`, {
             method:"POST", headers:{"content-type":"application/json"},
-            body:JSON.stringify({token:"00000000-0000-4000-8000-000000001079",reason:"correct the current restore target"}) });
+            body:JSON.stringify({token:mode.startsWith("same")?token:"00000000-0000-4000-8000-000000001079",reason:"correct the current restore target"}) });
           expect(corrected.status,JSON.stringify(await corrected.clone().json())).toBe(200);
+          const capture=await app.request(`/api/rigs/${rig.id}/snapshots`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({kind:"manual"})});
+          expect(capture.status,JSON.stringify(await capture.clone().json())).toBe(201);
+          const captured=await capture.json();
           const choice=chooseRestoreSnapshot({rigRepo,snapshotRepo,snapshotCapture,restoreOrchestrator},rig.id);
-          expect(choice).toMatchObject({ok:true,staleSnapshot:true,snapshot:null});
+          expect(choice).toMatchObject({ok:true,staleSnapshot:false,snapshot:{id:captured.id}});
           let settled = false;
           const manual = up().then(response => { settled=true; return response; });
           await new Promise<void>(r=>setTimeout(r,20));
@@ -97,9 +100,9 @@ describe("real automatic kernel restore and manual-up race", () => {
           release();
           const response = await manual;
           const body = await response.json();
-          expect.soft(response.status).toBeGreaterThanOrEqual(400);
-          expect.soft(JSON.stringify(body.warnings ?? [])).not.toContain("no second restore");
-          expect.soft(body.rigResult).not.toBe("fully_restored");
+          if(mode.startsWith("changed")) expect.soft(response.status).toBeGreaterThanOrEqual(400); else expect.soft(response.status).toBe(200);
+          if(mode.startsWith("changed")) expect.soft(JSON.stringify(body.warnings ?? [])).not.toContain("no second restore"); else expect.soft(JSON.stringify(body.warnings ?? [])).toContain("no second restore");
+          if(mode.startsWith("changed")) expect.soft(body.rigResult).not.toBe("fully_restored"); else expect.soft(body.rigResult).toBe("fully_restored");
         } else if (mode === "auto-first-plan") {
           const snapshotsBefore=db.prepare("SELECT COUNT(*) AS n FROM snapshots").get();
           const response=await up({plan:true});
@@ -127,13 +130,13 @@ describe("real automatic kernel restore and manual-up race", () => {
           expect(body.warnings[0]).toContain("no second restore was started");
           expect(JSON.stringify(body)).not.toMatch(/rig down|guard_target_changed|rig_not_stopped/);
         }
-        const autoResult=await automatic; if(mode === "auto-failed") expect(autoResult.errors.length).toBeGreaterThan(0); else if(mode!=="auto-occupant-changed") expect(autoResult).toEqual({errors:[]});
+        const autoResult=await automatic; if(mode === "auto-failed") expect(autoResult.errors.length).toBeGreaterThan(0); else if(!mode.endsWith("-snapshot")) expect(autoResult).toEqual({errors:[]});
       }
       await new Promise<void>(r => setImmediate(r));
       const status = tracker.getStatus();
-      if(mode!=="auto-occupant-changed") expect(status.kernelState).toBe(mode === "auto-failed" ? "bootstrap_failed" : "ready");
+      if(!mode.endsWith("-snapshot")) expect(status.kernelState).toBe(mode === "auto-failed" ? "bootstrap_failed" : "ready");
       expect(tmux.createSession).toHaveBeenCalledTimes(1);
-      if(mode!=="auto-occupant-changed") expect(sessionRegistry.getSessionsForRig(rig.id).filter(s => s.status === "running")).toHaveLength(mode === "auto-failed" ? 0 : 1);
+      if(!mode.endsWith("-snapshot")) expect(sessionRegistry.getSessionsForRig(rig.id).filter(s => s.status === "running")).toHaveLength(mode === "auto-failed" ? 0 : 1);
       if (mode === "auto-rehydrate") {
         expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots WHERE kind = 'auto-rehydrate'").get()).toEqual({ n: 1 });
       }

@@ -7,8 +7,10 @@ import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { RestoreOrchestrator } from "./restore-orchestrator.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
+import type Database from "better-sqlite3";
 import type { RestoreSnapshotSelection, Snapshot } from "./types.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "./rehydrate-eligibility.js";
+import { resolveActiveSnapshotSession } from "./active-occupant.js";
 
 export interface ExistingRigRestoreDeps {
   rigRepo: RigRepository;
@@ -63,7 +65,7 @@ export function chooseRestoreSnapshot(deps: ExistingRigRestoreDeps, rigId: strin
 export async function runExistingRigRestore(
   deps: ExistingRigRestoreDeps,
   choice: Extract<RestoreSnapshotChoice, { ok: true }>,
-  opts: { freshLogicalIds?: string[]; nonInterruptive?: boolean; exists: (path: string) => boolean },
+  opts: { freshLogicalIds?: string[]; nonInterruptive?: boolean; exists: (path: string) => boolean; onSnapshot?: (snapshotId: string) => void },
 ) {
   let { snapshot, snapshotSelection } = choice;
   let capturedCurrentState = false;
@@ -77,6 +79,7 @@ export async function runExistingRigRestore(
     };
     capturedCurrentState = true;
   }
+  opts.onSnapshot?.(snapshot.id);
   if (!deps.restoreOrchestrator) {
     return { snapshot, capturedCurrentState, result: { ok: false as const, code: "restore_unavailable" as const, message: "Restore orchestrator not available" } };
   }
@@ -97,11 +100,34 @@ export type ExistingRigRestoreOutcome =
 
 // The unattended restore running for each rig, per database: an equivalent `rig up <rig> --existing`
 // that arrives meanwhile waits for it instead of starting a second one.
-const unattendedRestores = new WeakMap<object, Map<string, Promise<ExistingRigRestoreOutcome>>>();
+// `snapshotId` is the snapshot that restore runs from, known as soon as it has chosen or captured it.
+type UnattendedRestore = { outcome: Promise<ExistingRigRestoreOutcome>; snapshotId: string | null };
+const unattendedRestores = new WeakMap<object, Map<string, UnattendedRestore>>();
 
 /** The unattended restore now running for this rig, if any. */
-export function unattendedRestoreInProgress(deps: ExistingRigRestoreDeps, rigId: string): Promise<ExistingRigRestoreOutcome> | null {
+export function unattendedRestoreInProgress(deps: ExistingRigRestoreDeps, rigId: string): UnattendedRestore | null {
   return unattendedRestores.get(deps.snapshotRepo.db)?.get(rigId) ?? null;
+}
+
+/** Whether every seat of `rig` still names the resume target `snapshot` restores it to: each seat's
+ *  newest live session carries the same resume type and token, or no token yet (a restore's own new
+ *  row before its launch writes one). The session rows themselves may differ, since a running
+ *  restore registers its own. A different token (an operator correction, a rotation), an occupant
+ *  where the snapshot had none, or an unresolved snapshot seat is not the same target. */
+export function seatsStillTarget(db: Database.Database, rig: Rig, snapshot: Snapshot): boolean {
+  const newest = db.prepare(
+    `SELECT resume_type AS resumeType, resume_token AS resumeToken FROM sessions
+      WHERE node_id = ? AND status NOT IN ('superseded', 'exited')
+      ORDER BY created_at DESC, id DESC LIMIT 1`,
+  );
+  return rig.nodes.every((node) => {
+    const target = resolveActiveSnapshotSession(snapshot.data, node.id);
+    const row = newest.get(node.id) as { resumeType: string | null; resumeToken: string | null } | undefined;
+    if (target.kind === "none") return !row?.resumeToken;
+    if (target.kind !== "resolved") return false;
+    if (!row?.resumeToken) return true;
+    return row.resumeType === (target.session.resumeType ?? null) && row.resumeToken === (target.session.resumeToken ?? null);
+  });
 }
 
 /** Restore an existing rig with no operator present (daemon start bringing back a lost kernel) and
@@ -112,16 +138,19 @@ export function restoreExistingRigUnattended(
   rigId: string,
   exists: (path: string) => boolean,
 ): Promise<{ errors: string[] }> {
+  const entry: UnattendedRestore = { outcome: Promise.resolve(null as never), snapshotId: null };
   const outcome = (async (): Promise<ExistingRigRestoreOutcome> => {
     const choice = chooseRestoreSnapshot(deps, rigId);
     if (!choice.ok) return { ok: false, choice };
-    return { ok: true, staleSnapshot: choice.staleSnapshot, ...await runExistingRigRestore(deps, choice, { exists }) };
+    const run = runExistingRigRestore(deps, choice, { exists, onSnapshot: (id) => { entry.snapshotId = id; } });
+    return { ok: true, staleSnapshot: choice.staleSnapshot, ...await run };
   })();
+  entry.outcome = outcome;
   const db = deps.snapshotRepo.db;
-  const running = unattendedRestores.get(db) ?? new Map<string, Promise<ExistingRigRestoreOutcome>>();
+  const running = unattendedRestores.get(db) ?? new Map<string, UnattendedRestore>();
   unattendedRestores.set(db, running);
-  running.set(rigId, outcome);
-  const settle = () => { if (running.get(rigId) === outcome) running.delete(rigId); };
+  running.set(rigId, entry);
+  const settle = () => { if (running.get(rigId) === entry) running.delete(rigId); };
   outcome.then(settle, settle);
   return outcome.then((done) => {
     if (!done.ok) return { errors: [done.choice.body.error] };

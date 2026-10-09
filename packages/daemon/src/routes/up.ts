@@ -9,7 +9,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
-import { chooseRestoreSnapshot, runExistingRigRestore, unattendedRestoreInProgress, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
+import { chooseRestoreSnapshot, runExistingRigRestore, seatsStillTarget, unattendedRestoreInProgress, type ExistingRigRestoreOutcome } from "../domain/existing-rig-restore.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { readFreshOccupantRelations } from "../domain/fresh-occupant-relation.js";
 import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
@@ -100,14 +100,16 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   // Daemon start is already restoring this rig (a kernel a reboot left down). A request for the same
   // restore waits for that one and reports its outcome: no second launch and no snapshot of its own.
   // One that asks for something else (--fresh seats, a non-interruptive choice) is not merged, and
-  // neither is one whose current target has changed since: when the seats' current occupants no
-  // longer match a restore-usable snapshot (an operator corrected a token, another occupant), the
-  // request takes the ordinary path and its refusals.
+  // neither is one whose target has changed since that restore began: every seat's newest session
+  // must still name the resume target the running restore is restoring (an operator token
+  // correction or another occupant does not). Otherwise the request takes the ordinary path and
+  // its refusals.
   if (!plan && !freshLogicalIds?.length && nonInterruptive === undefined) {
     const running = unattendedRestoreInProgress(deps, rigId);
-    const current = running ? chooseRestoreSnapshot(deps, rigId) : null;
-    if (running && current?.ok && !current.staleSnapshot && current.snapshot) {
-      return renderExistingRestore(rigId, rigName, deps, c, await running, true);
+    const runningSnapshot = running?.snapshotId ? snapshotRepo.getSnapshot(running.snapshotId) : null;
+    const rig = runningSnapshot ? deps.rigRepo.getRig(rigId) : null;
+    if (running && runningSnapshot && rig && seatsStillTarget(snapshotRepo.db, rig, runningSnapshot)) {
+      return renderExistingRestore(rigId, rigName, deps, c, await running.outcome, true);
     }
   }
   const choice = chooseRestoreSnapshot(deps, rigId);
