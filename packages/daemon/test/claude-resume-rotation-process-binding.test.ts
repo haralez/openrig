@@ -94,7 +94,6 @@ describe("resume launch marker binds the reporting process", () => {
       const clearBody = await cleared.json();
       const sent = await new SessionTransport({ db, rigRepo, sessionRegistry: registry, eventBus, tmuxAdapter: tmux, listProcesses, sleep: async () => {} }).send(name, "offline review");
       const stored = db.prepare("SELECT resume_token, resume_launch_token, resume_rotated_from, startup_status FROM sessions WHERE id = ?").get(session.id);
-      console.log(JSON.stringify({ delivered, childPayload, stored, identity: identity?.verdict, clearStatus: cleared.status, clearBody, sent }));
       expect.soft(stored).toMatchObject({ resume_rotated_from: null });
       expect.soft(identity?.verdict).toBe("mismatch");
       expect.soft(cleared.status).toBe(422);
