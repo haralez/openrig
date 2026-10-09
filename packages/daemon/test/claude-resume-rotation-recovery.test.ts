@@ -60,13 +60,14 @@ describe("managed Claude full down/up", () => {
       db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("restore-pod", rig.id, "Test");
       const node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code", podId: legacy ? undefined : "restore-pod" });
       new NativePermissionStore(db).write(node.id, { runtime: "claude-code", mode: "auto" }, "fixture", "retained Fleet posture");
-      const name = "test-c@restore-test";
+      // A legacy (non-pod) node gets the legacy canonical name from NodeLauncher.
+      const name = legacy ? "r00-restore-test-test_c" : "test-c@restore-test";
       const old = sessionRegistry.registerSession(node.id, name);
       sessionRegistry.updateStatus(old.id, "running");
       sessionRegistry.updateResumeToken(old.id, "claude_id", token, "scrape");
       sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%old" });
       if (!legacy) db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
-      // legacy-keep is the control: Claude resumes T1 and keeps its id.
+      // legacy-keep: Claude resumes T1 and keeps its id.
       const rotated = scenario === "legacy-keep" ? token : "00000000-0000-4000-8000-000000001077";
       const activity = new AgentActivityStore({ db, eventBus });
       const hooks = new Hono();
@@ -157,16 +158,13 @@ describe("managed Claude full down/up", () => {
       expect(row()).toMatchObject(kept
         ? { resume_token: token, resume_rotated_from: null }
         : { resume_token: rotated, resume_provenance: "hook", resume_source: resumed ? "resume" : "clear", resume_rotated_from: resumed ? token : null });
-      // The general reconciler cannot attribute this fixture's legacy (non-managed) launch even when
-      // the id is kept; a rotated legacy seat matches that control rather than being made worse.
-      expect(identity?.verdict).toBe(resumed && !legacy ? "verified" : "mismatch");
-      if (legacy && resumed) expect(identity?.reason).toBe("process_identity_ambiguous");
+      expect(identity?.verdict).toBe(resumed ? "verified" : "mismatch");
       // A resumed seat has nothing to clear; a delayed one recovers once its process is visible; a
       // /clear seat cannot be proved and stays in attention.
       expect(cleared.status).toBe(resumed ? delayed ? 200 : 409 : 422);
       expect(clearBody).toMatchObject({ ok: resumed && delayed, ...(resumed && !delayed ? { code: "not_in_attention" } : {}) });
       expect(sent.ok).toBe(true);
-      expect(String((sent as { warning?: string }).warning ?? "").includes("without verified native identity")).toBe(!resumed || legacy);
+      expect(String((sent as { warning?: string }).warning ?? "").includes("without verified native identity")).toBe(!resumed);
     },
   );
 });
