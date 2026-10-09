@@ -18,7 +18,7 @@ import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { observeClaudeResumeLaunch, verifyClaudePaneProcess } from "./native-process-lineage.js";
+import { observeClaudeResumeLaunch, verifyClaudePaneProcess, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
@@ -1043,9 +1043,10 @@ export class RestoreOrchestrator {
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
-            // The process this resume started, as the launch itself observes it (#1077).
+            // The process this resume started, as the launch itself observes it (#1077): the one its
+            // identity check proved, else one observed now.
             try {
-              const launched = await observeClaudeResumeLaunch({ target: sessionName, tmux: this.tmuxAdapter,
+              const launched = resumeOutcome.launchedProcess ?? await observeClaudeResumeLaunch({ target: sessionName, tmux: this.tmuxAdapter,
                 ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}), token: resumeToken });
               if (launched) this.sessionRegistry.recordResumeLaunchProcess(launchedSessionId, resumeToken, launched);
             } catch { /* best-effort: without it a rotation stays unproved, as before */ }
@@ -1498,7 +1499,7 @@ export class RestoreOrchestrator {
     effort?: string | null,
     warnings?: string[],
   ): Promise<
-    | { kind: "resumed" }
+    | { kind: "resumed"; launchedProcess?: ClaudeLaunchedProcess }
     | { kind: "retry_fresh" }
     | { kind: "failed"; message: string }
     | { kind: "attention_required"; message: string; evidence?: string }
@@ -1527,7 +1528,7 @@ export class RestoreOrchestrator {
         const notice = nonInterruptiveNotice("claude-code", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
-        return { kind: "resumed" };
+        return { kind: "resumed", ...(result.launchedProcess ? { launchedProcess: result.launchedProcess } : {}) };
       }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       // L3: surface attention_required from the Claude probe (resume-selection prompt).

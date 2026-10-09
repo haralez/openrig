@@ -413,7 +413,8 @@ describe("ClaudeResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
 
-      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
+      // The process the identity check proved is the launch's record of what it started (#1077).
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT, launchedProcess: { pid: 1235, startedAt: "Sat Jan  1 12:00:00 2000" } });
     });
 
     it.each([

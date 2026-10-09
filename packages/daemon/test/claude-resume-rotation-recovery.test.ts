@@ -43,11 +43,18 @@ describe("managed Claude full down/up", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
 
-  it.each(["managed-resume", "managed-delayed-ready-resume", "legacy-resume", "legacy-keep", "legacy-clear"])(
+  // legacy-replaced-after-proof (dev-review against 05b26c2f): the legacy resume's identity check
+  // proves 102 on T1; 202 then replaces it and sends the late first hook. The launch's record must
+  // stay the process its own check proved, not a later read.
+  it.each(["managed-resume", "managed-delayed-ready-resume", "legacy-resume", "legacy-keep", "legacy-clear", "legacy-replaced-after-proof"])(
     "independent recovery boundary: %s", async (scenario) => {
       const legacy = scenario.startsWith("legacy");
       const delayed = scenario.includes("delayed-ready");
-      const timing = scenario.endsWith("clear") ? "clear-before-ready" : "resume-before-ready";
+      const replacedAfterProof = scenario === "legacy-replaced-after-proof";
+      const timing = scenario.endsWith("clear") ? "clear-before-ready" : replacedAfterProof ? "resume-after-ready" : "resume-before-ready";
+      // The legacy resume's identity check takes the first two process samples.
+      let nativeReads = 0;
+      const replaced = () => replacedAfterProof && nativeReads > 2;
       let settling = delayed;
       const mode: string = "exact";
       const db = createFullTestDb(); dbs.push(db);
@@ -119,12 +126,12 @@ describe("managed Claude full down/up", () => {
       const paneRows = () => [
         { pid: 100, ppid: 1, pgid: 100, tpgid: mode === "bare-shell" ? 100 : 101, executableName: "bash", command: "-bash", startedAt },
         ...(mode === "bare-shell" ? [] : [{ pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt }]),
-        ...(mode === "bare-shell" ? [] : [{ pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: mode === "native" ? "2.1.285" : "claude", command: `${mode === "native" ? "/fixture/.local/share/claude/versions/2.1.285" : "/opt/claude.exe"} --permission-mode auto --resume ${mode === "wrong-token" ? "different" : token} --name ${name}`, startedAt }]),
+        ...(mode === "bare-shell" ? [] : [{ pid: replaced() ? 202 : 102, ppid: 101, pgid: 101, tpgid: 101, executableName: mode === "native" ? "2.1.285" : "claude", command: `${mode === "native" ? "/fixture/.local/share/claude/versions/2.1.285" : "/opt/claude.exe"} --permission-mode auto --resume ${mode === "wrong-token" ? "different" : token} --name ${name}`, startedAt: replaced() ? "Thu Oct  1 06:10:00 2026" : startedAt }]),
       ];
-      const listProcesses = async () => settling ? [] : paneRows();
+      const listProcesses = async () => { if (settling) return []; nativeReads += 1; return paneRows(); };
       // The relay of a SessionStart hook runs under the launched Claude (102) through a shell.
       const hookProcesses = async () => [...paneRows(),
-        { pid: 110, ppid: 102, pgid: 110, tpgid: 101, executableName: "sh", command: "/bin/sh -c node relay.cjs", startedAt },
+        { pid: 110, ppid: replaced() ? 202 : 102, pgid: 110, tpgid: 101, executableName: "sh", command: "/bin/sh -c node relay.cjs", startedAt },
         { pid: 111, ppid: 110, pgid: 110, tpgid: 101, executableName: "node", command: "node relay.cjs", startedAt }];
       // Real teardown captures the running occupant, exits the old row and clears bindings.
       const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
@@ -172,7 +179,7 @@ describe("managed Claude full down/up", () => {
       // A delayed launch could not observe the process it started, so nothing ties the hook's process
       // to OpenRig's launch (a replacement's hook looks the same): the rotation stays unproved, as on
       // main, and the seat stays in attention.
-      const proved = resumed && !delayed;
+      const proved = resumed && !delayed && !replacedAfterProof;
       expect(identity?.verdict).toBe(proved ? "verified" : "mismatch");
       // A resumed seat has nothing to clear; a /clear or unobserved-launch seat stays in attention.
       expect(cleared.status).toBe(proved ? 409 : 422);
