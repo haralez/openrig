@@ -99,10 +99,16 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   const { snapshotRepo } = deps;
   // Daemon start is already restoring this rig (a kernel a reboot left down). A request for the same
   // restore waits for that one and reports its outcome: no second launch and no snapshot of its own.
-  // One that asks for something else (--fresh seats, a non-interruptive choice) is not merged.
+  // One that asks for something else (--fresh seats, a non-interruptive choice) is not merged, and
+  // neither is one whose current target has changed since: when the seats' current occupants no
+  // longer match a restore-usable snapshot (an operator corrected a token, another occupant), the
+  // request takes the ordinary path and its refusals.
   if (!plan && !freshLogicalIds?.length && nonInterruptive === undefined) {
     const running = unattendedRestoreInProgress(deps, rigId);
-    if (running) return renderExistingRestore(rigId, rigName, deps, c, await running, true);
+    const current = running ? chooseRestoreSnapshot(deps, rigId) : null;
+    if (running && current?.ok && !current.staleSnapshot && current.snapshot) {
+      return renderExistingRestore(rigId, rigName, deps, c, await running, true);
+    }
   }
   const choice = chooseRestoreSnapshot(deps, rigId);
   if (!choice.ok) return c.json(choice.body, choice.status);
