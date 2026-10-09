@@ -18,7 +18,7 @@ import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { verifyClaudePaneProcess } from "./native-process-lineage.js";
+import { observeClaudeResumeLaunch, verifyClaudePaneProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
@@ -1042,6 +1042,14 @@ export class RestoreOrchestrator {
         const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort, warnings);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
+          if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
+            // The process this resume started, as the launch itself observes it (#1077).
+            try {
+              const launched = await observeClaudeResumeLaunch({ target: sessionName, tmux: this.tmuxAdapter,
+                ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}), token: resumeToken });
+              if (launched) this.sessionRegistry.recordResumeLaunchProcess(launchedSessionId, resumeToken, launched);
+            } catch { /* best-effort: without it a rotation stays unproved, as before */ }
+          }
         } else if (resumeOutcome.kind === "attention_required") {
           // L3 Decision 2: Claude resume-selection prompt -> attention_required.
           // Do NOT auto-answer. Reconcile later via reconcileNodeRuntimeTruth
@@ -1210,7 +1218,8 @@ export class RestoreOrchestrator {
 
           try {
             const { StartupOrchestrator } = await import("./startup-orchestrator.js");
-            const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
+            const startupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter,
+              ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
             const replayAsRestore = baseStatus !== "fresh-primed";
             const shouldLaunchHarness = isPodAware;
             const startupResult = await startupOrch.startNode({
@@ -1669,8 +1678,8 @@ export class RestoreOrchestrator {
     }
 
     const sessRow = this.db.prepare(
-      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_rotated_from, resume_rotated_process FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null } | undefined;
+      "SELECT session_name, resume_type, resume_token, resume_provenance, resume_rotated_from, resume_rotated_process, resume_launch_process FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null } | undefined;
     if (!sessRow || sessRow.session_name !== sessionName) {
       return { ok: false, code: "binding_mismatch", detail: `Canonical binding ${sessionName} does not match the latest session row.` };
     }

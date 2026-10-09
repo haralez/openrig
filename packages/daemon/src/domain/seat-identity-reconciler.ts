@@ -74,6 +74,7 @@ interface RunningSeatRow {
   resume_provenance?: string | null;
   resume_rotated_from?: string | null;
   resume_rotated_process?: string | null;
+  resume_launch_process?: string | null;
 }
 
 type PaneObservation = { pid: number | null; command: string | null };
@@ -120,7 +121,8 @@ export class SeatIdentityReconciler {
              s.session_name as session_name, b.tmux_pane as tmux_pane, s.resume_token as resume_token,
              s.resume_provenance as resume_provenance,
              s.resume_rotated_from as resume_rotated_from,
-             s.resume_rotated_process as resume_rotated_process
+             s.resume_rotated_process as resume_rotated_process,
+             s.resume_launch_process as resume_launch_process
       FROM nodes n
       JOIN sessions s ON s.node_id = n.id
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)

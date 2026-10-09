@@ -1012,9 +1012,10 @@ describe("RestoreOrchestrator", () => {
       if (failure === "bare") rows.pop();
       if (failure === "background") rows[2]!.pgid = 9000;
       if (failure === "unrelated") rows[2]!.ppid = 9000;
-      if (failure === "unstable" && calls > 1) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
+      // The launch's own record of its process (#1077) takes the first two samples; the A3 proof follows.
+      if (failure === "unstable" && calls > 3) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
       if (failure === "missing-metadata") rows[2]!.startedAt = "";
-      if (failure === "pane-changed") tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
+      if (failure === "pane-changed" && calls > 2) tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
       return rows;
     };
     if (failure === "ambiguous-pane") tmux.listPanes = vi.fn(async () => ["%1", "%2"].map(id => ({ id, index: 0, cwd: "/", width: 80, height: 24, active: true })));
@@ -3318,6 +3319,7 @@ describe("RestoreOrchestrator", () => {
       const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
       const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(seeded.nodeId) as { id: string };
       sessionRegistry.recordResumeLaunch(session.id, "tok-abc-123");
+      sessionRegistry.recordResumeLaunchProcess(session.id, "tok-abc-123", { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" });
       sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true, resumeLaunch, launchedProcess: { pid: 1236, startedAt: "Sat Jan  1 12:00:00 2000" } });
       const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows(argvToken) }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
       expect(result.ok).toBe(accepted);

@@ -414,6 +414,20 @@ export async function claudeHookFromLaunchedProcess(input: {
   } catch { return null; }
 }
 
+/** #1077 — the launch path's own record of the process it started to resume `token`: the pane's one
+ *  foreground Claude naming that token, stable across two samples, observed right after the launch
+ *  succeeded. A rotation counts only for this process. Null when it cannot be observed. */
+export async function observeClaudeResumeLaunch(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+  token: string;
+}): Promise<ClaudeLaunchedProcess | null> {
+  const native = await verifyClaudePaneProcess({ target: input.target, tmux: input.tmux, listProcesses: input.listProcesses,
+    expectedToken: input.token });
+  return native?.process.startedAt ? { pid: native.process.pid, startedAt: native.process.startedAt } : null;
+}
+
 export async function observeClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
   return observeNativePaneProcess(input, "claude-code");
 }

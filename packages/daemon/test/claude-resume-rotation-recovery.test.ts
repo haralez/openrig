@@ -35,7 +35,8 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 const autoScreen = "Restored conversation\n────────────────\n❯\u00a0\n────────────────\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n   ✘ Auto-update failed: no write permission to npm prefix · Run claude doctor\n  ● high · /effort\n";
 // #1077 recovery boundaries, derived from dev-review's reproduction against e427a030: a resume hook
 // that lands before any launch path records T1, on the managed path with native observations
-// briefly unavailable (attention, then recovery) and on the legacy (non-pod) restore path.
+// briefly unavailable (attention, which then stays: the launch never observed its process) and on
+// the legacy (non-pod) restore path.
 const token = "00000000-0000-4000-8000-000000000006";
 
 describe("managed Claude full down/up", () => {
@@ -168,13 +169,16 @@ describe("managed Claude full down/up", () => {
       expect(row()).toMatchObject(kept
         ? { resume_token: token, resume_rotated_from: null }
         : { resume_token: rotated, resume_provenance: "hook", resume_rotated_from: resumed ? token : null });
-      expect(identity?.verdict).toBe(resumed ? "verified" : "mismatch");
-      // A resumed seat has nothing to clear; a delayed one recovers once its process is visible; a
-      // /clear seat cannot be proved and stays in attention.
-      expect(cleared.status).toBe(resumed ? delayed ? 200 : 409 : 422);
-      expect(clearBody).toMatchObject({ ok: resumed && delayed, ...(resumed && !delayed ? { code: "not_in_attention" } : {}) });
+      // A delayed launch could not observe the process it started, so nothing ties the hook's process
+      // to OpenRig's launch (a replacement's hook looks the same): the rotation stays unproved, as on
+      // main, and the seat stays in attention.
+      const proved = resumed && !delayed;
+      expect(identity?.verdict).toBe(proved ? "verified" : "mismatch");
+      // A resumed seat has nothing to clear; a /clear or unobserved-launch seat stays in attention.
+      expect(cleared.status).toBe(proved ? 409 : 422);
+      expect(clearBody).toMatchObject({ ok: false, ...(proved ? { code: "not_in_attention" } : {}) });
       expect(sent.ok).toBe(true);
-      expect(String((sent as { warning?: string }).warning ?? "").includes("without verified native identity")).toBe(!resumed);
+      expect(String((sent as { warning?: string }).warning ?? "").includes("without verified native identity")).toBe(!proved);
     },
   );
 });

@@ -66,8 +66,9 @@ describe("Claude wrapper manual attention recovery", () => {
     "clear-attention after a %s into a new id answers %s", async (_source, rotatedFrom, status, startup) => {
       const f = fixture("rotated-token");
       // Only the first hook after OpenRig's --resume launch, a resume, records what it replaced.
-      f.db.prepare("UPDATE sessions SET resume_provenance = 'hook', resume_rotated_from = ?, resume_rotated_process = ? WHERE id = ?")
-        .run(rotatedFrom, rotatedFrom ? JSON.stringify({ pid: child.pid, startedAt }) : null, f.session.id);
+      f.db.prepare("UPDATE sessions SET resume_provenance = 'hook', resume_rotated_from = ?, resume_rotated_process = ?, resume_launch_process = ? WHERE id = ?")
+        .run(rotatedFrom, rotatedFrom ? JSON.stringify({ pid: child.pid, startedAt }) : null,
+          JSON.stringify({ token: "review-token", pid: child.pid, startedAt }), f.session.id);
       const result = await f.post();
       expect(result.status, JSON.stringify(result.body)).toBe(status);
       expect(f.startup()).toBe(startup);

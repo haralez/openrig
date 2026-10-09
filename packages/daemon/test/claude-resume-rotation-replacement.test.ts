@@ -28,9 +28,11 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 // T1 -> T2 vouches only for the process whose first hook qualified it. After the rotation is
 // recorded, a different process started on T1 (a replacement), or a deeper Claude under the
 // qualified one naming a third conversation, must leave identity, clear-attention, send and
-// strict restore unproved, as on main. Real teardown, restore, hook and clear-attention routes,
-// identity reconcile and SessionTransport; native observations are fixtures. The recorded process
-// is checked by pid and start time.
+// strict restore unproved, as on main. So must a replacement that sends the late first hook itself
+// (dev-review against 21c55946): the hook's process counts only when it is the one the launch path
+// observed starting on T1. Real teardown, restore, hook and clear-attention routes, identity
+// reconcile and SessionTransport; native observations are fixtures. Processes are compared by pid
+// and start time.
 
 // Shape of Fleet's Claude 2.1.220 auto-mode screen after full down/up:
 // the header has scrolled out; the empty prompt and mode footer remain.
@@ -51,6 +53,9 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     ["first-hook", "same"], ["late-hook", "same"],
     ["first-hook", "replaced"], ["late-hook", "replaced"],
     ["first-hook", "deeper-third"],
+    // dev-review's reproduction against 21c55946: the replacement comes before the late hook, so
+    // that hook is the replacement's own; only the launch's own observation tells them apart.
+    ["late-hook", "replaced-before-hook"],
   ] as const)("%s, then %s process", async (hookTiming, after) => {
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db);
@@ -111,28 +116,29 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
       sendKeys: vi.fn(async () => ({ ok: true })),
     } as unknown as TmuxAdapter;
     const startedAt = "Thu Oct  1 05:53:16 2026";
-    // Native observations are unavailable while restore runs, so the seat ends in attention and
-    // recovers only through clear-attention's strict restore reconcile.
-    let phase: "restoring" | "launched" | "after" = "restoring";
+    // The launch path records its own process (102) once the launch returns. The adapter's readiness
+    // check cannot see it in time, so the seat ends in attention and recovers only through
+    // clear-attention's strict restore reconcile.
+    let phase: "launched" | "after" = "launched";
+    const replaced = () => (after === "replaced" && phase === "after") || after === "replaced-before-hook" && hookTiming === "late-hook" && hooked;
+    let hooked = false;
     const claude = (pid: number, ppid: number, conversation: string, began: string) =>
       ({ pid, ppid, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${conversation} --name ${name}`, startedAt: began });
     const paneRows = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
       { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt },
-      ...(phase === "after" && after === "replaced"
-        ? [claude(202, 101, token, "Thu Oct  1 06:10:00 2026")]
-        : [claude(102, 101, token, startedAt)]),
+      ...(replaced() ? [claude(202, 101, token, "Thu Oct  1 06:10:00 2026")] : [claude(102, 101, token, startedAt)]),
       ...(phase === "after" && after === "deeper-third" ? [claude(103, 102, third, "Thu Oct  1 06:10:00 2026")] : []),
     ];
-    const listProcesses = async () => phase === "restoring" ? [] : paneRows();
-    // The relay of a SessionStart hook runs under the launched Claude (102) through a shell.
+    const listProcesses = async () => paneRows();
+    // The relay of a SessionStart hook runs under the pane's Claude through a shell.
     const hookProcesses = async () => [...paneRows(),
-      { pid: 110, ppid: 102, pgid: 110, tpgid: 101, executableName: "sh", command: "/bin/sh -c node relay.cjs", startedAt },
+      { pid: 110, ppid: replaced() ? 202 : 102, pgid: 110, tpgid: 101, executableName: "sh", command: "/bin/sh -c node relay.cjs", startedAt },
       { pid: 111, ppid: 110, pgid: 110, tpgid: 101, executableName: "node", command: "node relay.cjs", startedAt }];
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
     expect(down.errors).toEqual([]);
     const managed = { prepare: async () => ({ command: (args: readonly string[], env: Record<string, string> = {}) => [...Object.entries(env).map(([k, v]) => `${k}=${v}`), "claude", ...args].join(" "), assertCurrent: () => {}, configDir: "/fixture", executable: "/opt/claude.exe" }) } as unknown as ClaudeManagedLaunch;
-    const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {}, claudeManagedLaunch: managed,
+    const adapter = new ClaudeCodeAdapter({ tmux, listProcesses: async () => [], sleep: async () => {}, claudeManagedLaunch: managed,
       fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} } });
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
     const restore = new RestoreOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
@@ -142,8 +148,11 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     expect(up.ok).toBe(true);
     if (!up.ok) throw new Error(up.message);
     expect(up.result.nodes[0].status).toBe("attention_required");
-    phase = "launched";
-    if (hookTiming === "late-hook") await hook();
+    if (hookTiming === "late-hook") {
+      // The first post was lost and the claim removed: a later post counts as first.
+      hooked = after === "replaced-before-hook";
+      await hook();
+    }
     // The rotation is recorded against the process that qualified it, before anything changes.
     expect(row()).toMatchObject({ resume_token: rotated, resume_provenance: "hook", resume_rotated_from: token });
     phase = "after";

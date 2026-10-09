@@ -4,7 +4,7 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { SessionRegistry, claudeResumeRotation } from "../src/domain/session-registry.js";
+import { CLAUDE_RESUME_ROTATION_COLUMNS, SessionRegistry, claudeResumeRotation } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -50,6 +50,8 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     registry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
     // OpenRig launched this seat with `--resume original`.
     registry.recordResumeLaunch(session.id, original);
+    // ... and observed the process it started (102 below) right after the launch.
+    registry.recordResumeLaunchProcess(session.id, original, { pid: 102, startedAt: "Sat Oct  3 01:00:00 2026" });
     const store = new AgentActivityStore({ db, eventBus });
     const app = new Hono();
     // The process table while a SessionStart hook runs: the pane's launched Claude (102) ran the
@@ -187,7 +189,7 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     expect(send).toHaveBeenCalledTimes(1);
     const result = await send.mock.results[0]!.value;
     const stored = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(session.id) as { resume_token: string };
-    const rotation = db.prepare("SELECT resume_token, resume_provenance, resume_rotated_from, resume_rotated_process FROM sessions WHERE id = ?")
+    const rotation = db.prepare(`SELECT ${CLAUDE_RESUME_ROTATION_COLUMNS} FROM sessions WHERE id = ?`)
       .get(session.id) as Parameters<typeof claudeResumeRotation>[0];
     // Independent of delivery effects: strict identity stays unproved for a mismatch.
     const input = { target: "%1", tmux, listProcesses: async () => rows, expectedToken: stored.resume_token,

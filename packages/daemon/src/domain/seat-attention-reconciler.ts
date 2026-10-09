@@ -2,7 +2,7 @@
 // startup_status=attention_required. Managed writer + append-only audit.
 
 import type Database from "better-sqlite3";
-import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
+import { CLAUDE_RESUME_ROTATION_COLUMNS, claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
@@ -25,7 +25,7 @@ export type PaneIdentityReconcileResult =
 function storedRotation(db: Database.Database, nodeId: string, expectedToken: string): ClaudeResumeRotation | null {
   try {
     const row = db.prepare(
-      "SELECT resume_token, resume_provenance, resume_rotated_from, resume_rotated_process FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1",
+      `SELECT ${CLAUDE_RESUME_ROTATION_COLUMNS} FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1`,
     ).get(nodeId) as Parameters<typeof claudeResumeRotation>[0];
     return row?.resume_token === expectedToken ? claudeResumeRotation(row) : null;
   } catch { return null; }

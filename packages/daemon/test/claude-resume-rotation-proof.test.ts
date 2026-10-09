@@ -14,7 +14,7 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { SessionRegistry, claudeResumeRotation } from "../src/domain/session-registry.js";
+import { CLAUDE_RESUME_ROTATION_COLUMNS, SessionRegistry, claudeResumeRotation } from "../src/domain/session-registry.js";
 import { verifyClaudePaneProcess, observeClaudeDelivery, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 const require = createRequire(import.meta.url);
@@ -31,7 +31,7 @@ const launchedClaude = { pid: 4242, startedAt: "Fri Oct  9 01:00:00 2026" };
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
-function seat(opts: { armed?: boolean; launchWrite?: boolean } = {}) {
+function seat(opts: { armed?: boolean; launchWrite?: boolean; launchObserved?: typeof launchedClaude | null } = {}) {
   const db = createDb(); databases.push(db);
   migrate(db, ALL_MIGRATIONS);
   const rigRepo = new RigRepository(db), registry = new SessionRegistry(db);
@@ -40,6 +40,9 @@ function seat(opts: { armed?: boolean; launchWrite?: boolean } = {}) {
   const session = registry.registerSession(node.id, "dev-impl@rotation");
   // OpenRig arms the launch before starting `claude --resume T1` (startup-orchestrator, legacy restore).
   if (opts.armed !== false) registry.recordResumeLaunch(session.id, T1);
+  // The launch path's own record of the process it started on T1 (null: it could not observe one).
+  const launchObserved = opts.launchObserved === undefined ? launchedClaude : opts.launchObserved;
+  if (opts.armed !== false && launchObserved) registry.recordResumeLaunchProcess(session.id, T1, launchObserved);
   // The launch path may write T1 afterwards (provenance scrape); the hook can also land first.
   if (opts.launchWrite !== false) registry.updateResumeToken(session.id, "claude_id", T1, "scrape");
   const generation = registry.currentOccupantTenure(node.id)!.generationUuid;
@@ -51,13 +54,36 @@ function seat(opts: { armed?: boolean; launchWrite?: boolean } = {}) {
     registry.recordHookSessionIdentity(session.id, "claude_id", token,
       { source, currentGeneration, resumeLaunch, launchedProcess: launchedProcess ? launchedClaude : null });
   const rotation = () => claudeResumeRotation(db.prepare(
-    "SELECT resume_token, resume_provenance, resume_rotated_from, resume_rotated_process FROM sessions WHERE id = ?",
+    `SELECT ${CLAUDE_RESUME_ROTATION_COLUMNS} FROM sessions WHERE id = ?`,
   ).get(session.id) as Parameters<typeof claudeResumeRotation>[0]);
   const rotatedFrom = () => rotation()?.token ?? null;
   return { db, registry, session, node, generation, row, hook, rotation, rotatedFrom };
 }
 
 describe("the first hook after OpenRig's --resume launch", () => {
+  // dev-review's reproduction against 21c55946: with the first post lost and the claim removed, a
+  // replacement's own hook counts as first. Only the launch path's record of its process tells them apart.
+  it.each([
+    ["the launch observed another process (a replacement sent the hook)", { pid: 4243, startedAt: launchedClaude.startedAt }],
+    ["the launch observed a reused pid with another start time", { pid: launchedClaude.pid, startedAt: "Fri Oct  9 00:59:00 2026" }],
+    ["the launch could not observe its process", null],
+  ] as const)("no rotation when %s", (_label, launchObserved) => {
+    const s = seat({ launchObserved });
+    expect(s.hook(T2, "resume")).toBe(true);
+    expect(s.rotation()).toBeNull();
+    expect(s.registry.claudeResumeRotatedFrom(s.session.id, T1)).toBe(false);
+  });
+
+  it("an early hook counts once the launch records the same process, and re-arming drops it", () => {
+    const s = seat({ launchObserved: null });
+    expect(s.hook(T2, "resume")).toBe(true);
+    expect(s.rotation()).toBeNull();
+    s.registry.recordResumeLaunchProcess(s.session.id, T1, launchedClaude);
+    expect(s.rotation()).toEqual({ token: T1, process: launchedClaude });
+    s.registry.recordResumeLaunch(s.session.id, T2);
+    expect(s.rotation()).toBeNull();
+  });
+
   it.each([true, false])("a resume into a new id names the launch token (launch wrote T1 first: %s)", (launchWrite) => {
     const s = seat({ launchWrite });
     expect(s.hook(T2, "resume")).toBe(true);

@@ -177,16 +177,17 @@ describe("A3 Claude shell sampling", () => {
     const f = fixture();
     // The registry records resume_rotated_from only for a resume into a new id; other sources leave it null.
     // The rotation names the process that qualified it: the pane's Claude (11).
-    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'hook', resume_rotated_from = ?, resume_rotated_process = ?")
-      .run(rotatedFrom, rotatedFrom ? JSON.stringify({ pid: 11, startedAt: "start" }) : null);
+    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'hook', resume_rotated_from = ?, resume_rotated_process = ?, resume_launch_process = ?")
+      .run(rotatedFrom, rotatedFrom ? JSON.stringify({ pid: 11, startedAt: "start" }) : null,
+        JSON.stringify({ token: "saved-token", pid: 11, startedAt: "start" }));
     await f.rec.reconcileAll();
     expect(f.verdict()?.verdict).toBe(expected);
   });
 
   it("does not accept a recorded resume once the stored token is an operator's", async () => {
     const f = fixture();
-    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'operator', resume_rotated_from = 'saved-token', resume_rotated_process = ?")
-      .run(JSON.stringify({ pid: 11, startedAt: "start" }));
+    f.db.prepare("UPDATE sessions SET resume_token = 'rotated-token', resume_provenance = 'operator', resume_rotated_from = 'saved-token', resume_rotated_process = ?, resume_launch_process = ?")
+      .run(JSON.stringify({ pid: 11, startedAt: "start" }), JSON.stringify({ token: "saved-token", pid: 11, startedAt: "start" }));
     await f.rec.reconcileAll();
     expect(f.verdict()?.verdict).toBe("mismatch");
   });
