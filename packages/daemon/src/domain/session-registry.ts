@@ -377,14 +377,16 @@ export class SessionRegistry {
    * launch, whatever its source: only that hook can name T1 as the token it replaced, and only when
    * it reports `source: "resume"`, a different id, and the launch marker OpenRig put on that
    * process's command (`OPENRIG_RESUME_LAUNCH=T1`), which a Claude started by hand in the pane does
-   * not carry. Any later hook (an in-process `/resume`, a child `claude -p --resume` sharing the
+   * not carry, and when the caller observed that the hook came from the launched process itself
+   * (`claudeHookFromLaunchedProcess`): a child `claude -p --resume` inherits the marker but is a
+   * different process. Any later hook (an in-process `/resume`, a child `claude -p --resume` sharing the
    * seat's environment, a replacement process) has no launch to name, which leaves today's refusal
    * in place. */
   recordHookSessionIdentity(
     sessionId: string,
     type: string,
     token: string,
-    evidence: { source: string | null; currentGeneration: boolean; resumeLaunch?: string | null },
+    evidence: { source: string | null; currentGeneration: boolean; resumeLaunch?: string | null; launchedProcess?: boolean },
   ): boolean {
     return this.db.transaction(() => {
       const launched = (this.db.prepare("SELECT resume_launch_token FROM sessions WHERE id = ?").get(sessionId) as
@@ -393,12 +395,18 @@ export class SessionRegistry {
       if (launched && evidence.currentGeneration) {
         this.db.prepare("UPDATE sessions SET resume_launch_token = NULL WHERE id = ?").run(sessionId);
         if (written && evidence.source === "resume" && evidence.resumeLaunch?.trim() === launched
-          && launched !== token.trim()) {
+          && evidence.launchedProcess === true && launched !== token.trim()) {
           this.db.prepare("UPDATE sessions SET resume_rotated_from = ? WHERE id = ?").run(launched, sessionId);
         }
       }
       return written;
     })();
+  }
+
+  /** The resume launch armed for this row and not yet consumed by a hook, if any. */
+  armedResumeLaunch(sessionId: string): string | null {
+    return (this.db.prepare("SELECT resume_launch_token FROM sessions WHERE id = ?").get(sessionId) as
+      { resume_launch_token: string | null } | undefined)?.resume_launch_token?.trim() || null;
   }
 
   /** Arm the launch about to resume `token` in this row's Claude process (null for a fresh launch).

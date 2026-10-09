@@ -3318,7 +3318,7 @@ describe("RestoreOrchestrator", () => {
       const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
       const session = db.prepare("SELECT id FROM sessions WHERE node_id = ?").get(seeded.nodeId) as { id: string };
       sessionRegistry.recordResumeLaunch(session.id, "tok-abc-123");
-      sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true, resumeLaunch });
+      sessionRegistry.recordHookSessionIdentity(session.id, "claude_id", "tok-rotated-456", { source, currentGeneration: true, resumeLaunch, launchedProcess: true });
       const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows(argvToken) }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
       expect(result.ok).toBe(accepted);
       if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");

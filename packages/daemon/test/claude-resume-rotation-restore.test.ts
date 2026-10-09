@@ -63,6 +63,8 @@ describe("managed Claude full down/up", () => {
       const activity = new AgentActivityStore({ db, eventBus });
       const hooks = new Hono();
       hooks.use("*", async (c, next) => {
+        c.set("tmuxAdapter" as never, tmux as never);
+        c.set("listProcesses" as never, hookProcesses as never);
         c.set("agentActivityStore" as never, activity as never);
         c.set("activityHookToken" as never, "fixture" as never);
         c.set("sessionRegistry" as never, sessionRegistry as never);
@@ -76,7 +78,7 @@ describe("managed Claude full down/up", () => {
           headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
           body: JSON.stringify({ eventFamily: "session_identity", hookEvent: "SessionStart", sessionName: name, nodeId: node.id,
             runtime: "claude-code", generation: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid,
-            source: timing.startsWith("clear") ? "clear" : "resume", resumeLaunch: launchMarker, sessionId: rotated }) });
+            source: timing.startsWith("clear") ? "clear" : "resume", resumeLaunch: launchMarker, hookPid: 111, sessionId: rotated }) });
         expect(response.status).toBe(200);
         expect(await response.json()).toMatchObject({ tokenPersisted: true });
       };
@@ -104,11 +106,16 @@ describe("managed Claude full down/up", () => {
         sendKeys: vi.fn(async () => ({ ok: true })),
       } as unknown as TmuxAdapter;
       const startedAt = "Thu Oct  1 05:53:16 2026";
-      const listProcesses = async () => [
+      const paneRows = () => [
         { pid: 100, ppid: 1, pgid: 100, tpgid: mode === "bare-shell" ? 100 : 101, executableName: "bash", command: "-bash", startedAt },
         ...(mode === "bare-shell" ? [] : [{ pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt }]),
         ...(mode === "bare-shell" ? [] : [{ pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: mode === "native" ? "2.1.285" : "claude", command: `${mode === "native" ? "/fixture/.local/share/claude/versions/2.1.285" : "/opt/claude.exe"} --permission-mode auto --resume ${mode === "wrong-token" ? "different" : token} --name ${name}`, startedAt }]),
       ];
+      const listProcesses = async () => paneRows();
+      // The relay of a SessionStart hook runs under the launched Claude (102) through a shell.
+      const hookProcesses = async () => [...paneRows(),
+        { pid: 110, ppid: 102, pgid: 110, tpgid: 101, executableName: "sh", command: "/bin/sh -c node relay.cjs", startedAt },
+        { pid: 111, ppid: 110, pgid: 110, tpgid: 101, executableName: "node", command: "node relay.cjs", startedAt }];
       // Real teardown captures the running occupant, exits the old row and clears bindings.
       const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
       expect(down.errors).toEqual([]);

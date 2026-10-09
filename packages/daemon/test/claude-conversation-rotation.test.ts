@@ -31,7 +31,8 @@ type Mode = "unchanged" | "rotation" | "duplicate-hook" | "delayed-hook" | "shim
 // It also forwards OPENRIG_RESUME_LAUNCH, which only the command OpenRig sent carries.
 const sourcedModes = ["resume-rotation", "resume-then-clear", "clear-sourced", "startup-sourced",
   "compact-sourced", "resume-stale-generation", "resume-no-source",
-  "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume"] as const;
+  "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume",
+  "resume-child-missed-parent"] as const;
 type SourcedMode = typeof sourcedModes[number];
 const tokenOnlyModes = ["N1-settings-before", "settings-after", "plain-wrong-token", "lone-wrong-shim"] as const;
 
@@ -51,7 +52,24 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     registry.recordResumeLaunch(session.id, original);
     const store = new AgentActivityStore({ db, eventBus });
     const app = new Hono();
+    // The process table while a SessionStart hook runs: the pane's launched Claude (102) ran the
+    // relay through a shell (110 -> 111); a `claude -p --resume` its Bash tool started (120, own
+    // process group) ran its own relay (121 -> 122), inheriting the launch environment.
+    const hookStartedAt = "Sat Oct  3 00:59:00 2026";
+    const hookRows: NativeProcessRow[] = [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt: hookStartedAt },
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /fixture/launch", startedAt: hookStartedAt },
+      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude --resume ${original}`, startedAt: hookStartedAt },
+      { pid: 110, ppid: 102, pgid: 110, tpgid: 101, executableName: "sh", command: "/bin/sh -c node relay.cjs", startedAt: hookStartedAt },
+      { pid: 111, ppid: 110, pgid: 110, tpgid: 101, executableName: "node", command: "node relay.cjs", startedAt: hookStartedAt },
+      { pid: 115, ppid: 102, pgid: 115, tpgid: 101, executableName: "bash", command: "/bin/bash -c claude -p --resume", startedAt: hookStartedAt },
+      { pid: 120, ppid: 115, pgid: 115, tpgid: 101, executableName: "claude", command: `/opt/claude -p --resume ${original}`, startedAt: hookStartedAt },
+      { pid: 121, ppid: 120, pgid: 115, tpgid: 101, executableName: "sh", command: "/bin/sh -c node relay.cjs", startedAt: hookStartedAt },
+      { pid: 122, ppid: 121, pgid: 115, tpgid: 101, executableName: "node", command: "node relay.cjs", startedAt: hookStartedAt },
+    ];
     app.use("*", async (c, next) => {
+      c.set("tmuxAdapter" as never, { getPanePid: async () => 100 } as never);
+      c.set("listProcesses" as never, (() => hookRows) as never);
       c.set("agentActivityStore" as never, store as never);
       c.set("activityHookToken" as never, "fixture" as never);
       c.set("sessionRegistry" as never, registry as never);
@@ -60,11 +78,11 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     });
     app.route("/api/activity", activityRoutes);
     const generation = registry.currentOccupantTenure(node.id)!.generationUuid;
-    const hook = async (token: string, occurredAt?: string, evidence: { source?: string; generation?: string; resumeLaunch?: string } = {}) => {
+    const hook = async (token: string, occurredAt?: string, evidence: { source?: string; generation?: string; resumeLaunch?: string; hookPid?: number } = {}) => {
       const response = await app.request("/api/activity/hooks", {
         method: "POST",
         headers: { "content-type": "application/json", "x-openrig-activity-token": "fixture" },
-        body: JSON.stringify({ eventFamily: "session_identity", sessionName: name, runtime: "claude-code", sessionId: token, occurredAt, ...evidence }),
+        body: JSON.stringify({ eventFamily: "session_identity", sessionName: name, runtime: "claude-code", sessionId: token, occurredAt, hookPid: 111, ...evidence }),
       });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ tokenPersisted: true });
@@ -82,7 +100,10 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
       // The launched process's own first hook kept its id. What follows is an in-process /resume,
       // or a child `claude -p --resume` that inherited the seat's environment, marker included.
       if (mode === "resume-after-launch-hook") await hook(original, undefined, { source: "resume", generation, resumeLaunch });
-      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation, resumeLaunch });
+      // resume-child-missed-parent: the launched process's own hook never reached the daemon; the
+      // first one to arrive is the child's, with the inherited marker and generation.
+      const hookPid = mode === "resume-after-launch-hook" || mode === "resume-child-missed-parent" ? 122 : 111;
+      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation, resumeLaunch, hookPid });
       if (mode === "resume-then-clear" || mode === "resume-clear-resume") await hook(third, undefined, { source: "clear", generation });
       if (mode === "resume-clear-resume") await hook(rotated, undefined, { source: "resume", generation, resumeLaunch });
     } else if (mode !== "unchanged" && !tokenOnly) {
@@ -234,7 +255,7 @@ describe("a resumed conversation that changed its id, with the hook's evidence (
   });
 
   it.each(["clear-sourced", "resume-then-clear", "startup-sourced", "compact-sourced", "resume-stale-generation", "resume-no-source",
-    "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume"] as const)(
+    "resume-no-marker", "resume-other-marker", "resume-after-launch-hook", "resume-clear-resume", "resume-child-missed-parent"] as const)(
     "%s keeps today's warning: the conversation is unverified", async mode => {
       const { result, calls, observed, strict } = await sendAfterHook(mode);
       expect(observed.state).toBe("unknown");

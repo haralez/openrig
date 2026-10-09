@@ -173,6 +173,8 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
     hookEvent,
     source,
     resumeLaunch,
+    // The daemon finds the Claude that ran this hook from its parent chain.
+    hookPid: process.pid,
     sessionId,
     occurredAt: now().toISOString(),
   };

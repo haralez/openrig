@@ -42,8 +42,8 @@ function seat(opts: { armed?: boolean; launchWrite?: boolean } = {}) {
     "SELECT resume_token, resume_provenance, resume_launch_token, resume_rotated_from FROM sessions WHERE id = ?",
   ).get(session.id) as { resume_token: string; resume_provenance: string; resume_launch_token: string | null; resume_rotated_from: string | null };
   // By default the hook comes from the process OpenRig launched, whose command carried the marker.
-  const hook = (token: string, source: string | null, currentGeneration = true, resumeLaunch: string | null = T1) =>
-    registry.recordHookSessionIdentity(session.id, "claude_id", token, { source, currentGeneration, resumeLaunch });
+  const hook = (token: string, source: string | null, currentGeneration = true, resumeLaunch: string | null = T1, launchedProcess = true) =>
+    registry.recordHookSessionIdentity(session.id, "claude_id", token, { source, currentGeneration, resumeLaunch, launchedProcess });
   return { db, registry, session, node, generation, row, hook };
 }
 
@@ -82,6 +82,12 @@ describe("the first hook after OpenRig's --resume launch", () => {
     expect(s.row()).toMatchObject({ resume_token: T2, resume_launch_token: null, resume_rotated_from: null });
     s.hook(T3, "resume");
     expect(claudeRotatedFromToken(s.row())).toBeNull();
+  });
+
+  it("a hook not observed to come from the launched process (a child claude -p inheriting the marker) names nothing", () => {
+    const s = seat();
+    s.hook(T2, "resume", true, T1, false);
+    expect(s.row()).toMatchObject({ resume_token: T2, resume_launch_token: null, resume_rotated_from: null });
   });
 
   it("a stale-generation hook neither qualifies nor consumes the launch", () => {
@@ -157,7 +163,8 @@ describe("the relay forwards the evidence", () => {
       { OPENRIG_SESSION_NAME: "dev-impl@rotation", OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "gen-1",
         OPENRIG_RESUME_LAUNCH: T1 },
     );
-    expect(payload).toMatchObject({ eventFamily: "session_identity", sessionId: T2, source: "resume", generation: "gen-1", resumeLaunch: T1 });
+    expect(payload).toMatchObject({ eventFamily: "session_identity", sessionId: T2, source: "resume", generation: "gen-1", resumeLaunch: T1,
+      hookPid: process.pid });
   });
 
   it("sends nulls when the runtime or launch did not provide them", () => {

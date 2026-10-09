@@ -347,6 +347,37 @@ export async function verifyCodexPaneProcess(input: Parameters<typeof observeCod
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 
+/** #1077 — whether a Claude hook was emitted by the process OpenRig launched to resume `launchToken`:
+ *  the pane's one foreground Claude, whose argv names that token, must be the hook process's parent
+ *  or grandparent (Claude runs a hook through a shell, which may exec it), with no other Claude
+ *  between. A `claude -p --resume` started from inside the seat inherits the launch environment,
+ *  but its own hooks have that child as their nearest Claude. Fails closed on anything unobserved. */
+export async function claudeHookFromLaunchedProcess(input: {
+  target: string;
+  tmux: { getPanePid(target: string): Promise<number | null> };
+  listProcesses?: NativeProcessLister;
+  launchToken: string;
+  hookPid: number;
+}): Promise<boolean> {
+  try {
+    const panePid = await input.tmux.getPanePid(input.target);
+    if (!panePid) return false;
+    const rows = await (input.listProcesses ?? listNativeProcesses)();
+    const launched = selectNativeProcess(rows, panePid, input.launchToken, false, "claude-code");
+    if (!launched) return false;
+    const byPid = new Map(rows.map((row) => [row.pid, row]));
+    let current = byPid.get(input.hookPid);
+    if (!current) return false;
+    for (let hop = 0; hop < 2; hop++) {
+      current = byPid.get(current.ppid);
+      if (!current) return false;
+      if (current.pid === launched.process.pid) return current.startedAt === launched.process.startedAt;
+      if (claudeExecutable(tokens(current.command)[0] ?? "") || /claude/i.test(current.executableName ?? "")) return false;
+    }
+    return false;
+  } catch { return false; }
+}
+
 export async function observeClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
   return observeNativePaneProcess(input, "claude-code");
 }
