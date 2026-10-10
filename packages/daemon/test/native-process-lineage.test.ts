@@ -110,6 +110,11 @@ describe("joined native Codex identity", () => {
     expect(find({ ...beneath, executableName: "node", command: "node relay.cjs" })).toBe(10);
     expect(find({ ...beneath, executableName: "node", command: "node -r /usr/local/bin/claude relay.cjs" })).toBe(10);
     expect(find({ ...beneath, executableName: "node", command: "node -e 'require(\"/usr/local/bin/claude\")'" })).toBe(10);
+    // Node runs no script file here, so a claude path after it is data (dev-review against 8208c721).
+    for (const command of ["node --eval=setInterval(()=>{},1000) /usr/local/bin/claude", "node - /usr/local/bin/claude",
+      "node -pe 1 /usr/local/bin/claude", "node --print=1 /usr/local/bin/claude", "node --no-warnings -e 1 /usr/local/bin/claude"]) {
+      expect(find({ ...beneath, executableName: "node", command }), command).toBe(10);
+    }
     expect(find({ pid: 11, ppid: 10, pgid: 11, executableName: "claude", command: "claude mcp serve" })).toBe(10);
   });
 });

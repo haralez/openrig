@@ -279,12 +279,14 @@ function claudeRuntime(row: NativeProcessRow): boolean {
 const NODE_OPTIONS_WITH_VALUE = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader",
   "-C", "--conditions", "--env-file", "--env-file-if-exists", "--inspect-port", "--title", "--input-type"]);
 
-/** The script Node runs: the first argument after Node's own options, or null for -e/-p or none. */
+/** The script Node runs: the first argument after Node's own options. Null when Node runs no script
+ * file: code given with -e/-p (also --eval=, --print=, and joined short flags such as -pe), stdin
+ * (`-`), or no argument. Arguments after those are data, never a script. */
 function nodeScript(args: string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === "--") return args[index + 1] ?? null;
-    if (["-e", "--eval", "-p", "--print"].includes(arg)) return null;
+    if (arg === "-" || /^--(?:eval|print)(?:=|$)/.test(arg) || /^-[a-zA-Z]*[ep][a-zA-Z]*$/.test(arg)) return null;
     if (!arg.startsWith("-")) return arg;
     if (NODE_OPTIONS_WITH_VALUE.has(arg)) index += 1;
   }
