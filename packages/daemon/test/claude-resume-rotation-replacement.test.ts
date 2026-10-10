@@ -56,6 +56,8 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     // #1080 maintainer review of 6e36b94d: Claude run by Node (argv[1] is the claude script), and
     // an older process entry with no OS executable name or process group, are Claude beneath too.
     ["first-hook", "deeper-node-hosted"], ["first-hook", "deeper-no-os-name"],
+    // CodeRabbit on d0419ff7: Node options before the claude script.
+    ["first-hook", "deeper-node-options"],
     // dev-review's reproduction against 21c55946: the replacement comes before the late hook, so
     // that hook is the replacement's own; only the launch's own observation tells them apart.
     ["late-hook", "replaced-before-hook"],
@@ -132,8 +134,9 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
       || (after === "replaced-during-readiness" && readinessSamples > 1);
     const claude = (pid: number, ppid: number, conversation: string, began: string) =>
       ({ pid, ppid, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${conversation} --name ${name}`, startedAt: began });
-    const deeper = () => after === "deeper-node-hosted"
-      ? { ...claude(103, 102, third, "Thu Oct  1 06:10:00 2026"), executableName: "node", command: `node /usr/local/bin/claude --resume ${third}` }
+    const deeper = () => after === "deeper-node-hosted" || after === "deeper-node-options"
+      ? { ...claude(103, 102, third, "Thu Oct  1 06:10:00 2026"), executableName: "node",
+        command: `node ${after === "deeper-node-options" ? "--no-warnings " : ""}/usr/local/bin/claude --resume ${third}` }
       : after === "deeper-no-os-name"
         ? { pid: 103, ppid: 102, command: `claude --resume ${third}` }
         : claude(103, 102, third, "Thu Oct  1 06:10:00 2026");

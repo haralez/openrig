@@ -268,9 +268,27 @@ function claudeBeneath(top: NativeProcessRow, byParent: Map<number, NativeProces
  *  no OS executable name), and Node running the claude script as argv[1]. */
 function claudeRuntime(row: NativeProcessRow): boolean {
   if (claudeProcess(row)) return true;
-  const [argv0 = "", argv1 = ""] = tokens(row.command);
+  const [argv0 = "", ...args] = tokens(row.command);
   if (claudeExecutable(argv0)) return true;
-  return executableName(argv0) === "node" && (claudeExecutable(argv1) || /\/@anthropic-ai\/claude-code\/cli\.m?js$/.test(argv1));
+  if (executableName(argv0) !== "node") return false;
+  const script = nodeScript(args);
+  return !!script && (claudeExecutable(script) || /\/@anthropic-ai\/claude-code\/cli\.m?js$/.test(script));
+}
+
+// Node options that take their value as the next argument.
+const NODE_OPTIONS_WITH_VALUE = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader",
+  "-C", "--conditions", "--env-file", "--env-file-if-exists", "--inspect-port", "--title", "--input-type"]);
+
+/** The script Node runs: the first argument after Node's own options, or null for -e/-p or none. */
+function nodeScript(args: string[]): string | null {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--") return args[index + 1] ?? null;
+    if (["-e", "--eval", "-p", "--print"].includes(arg)) return null;
+    if (!arg.startsWith("-")) return arg;
+    if (NODE_OPTIONS_WITH_VALUE.has(arg)) index += 1;
+  }
+  return null;
 }
 
 /** The same OS observation serves menu input, restore proof and periodic identity.

@@ -101,11 +101,15 @@ describe("joined native Codex identity", () => {
     for (const child of [
       { ...beneath, executableName: "node", command: "node /usr/local/bin/claude --resume other" },
       { ...beneath, executableName: "node", command: "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js -p hi" },
+      { ...beneath, executableName: "node", command: "node --no-warnings /usr/local/bin/claude --resume other" },
+      { ...beneath, executableName: "node", command: "node -r ./preload.cjs --max-old-space-size=4096 -- /usr/local/bin/claude --resume other" },
       { ...beneath, command: "claude --resume other" },
       { pid: 11, ppid: 10, command: "/opt/claude.exe --resume other" },
     ]) expect(find(child), child.command).toBeNull();
     // Not Claude, or not in the foreground: the launched process still proves.
     expect(find({ ...beneath, executableName: "node", command: "node relay.cjs" })).toBe(10);
+    expect(find({ ...beneath, executableName: "node", command: "node -r /usr/local/bin/claude relay.cjs" })).toBe(10);
+    expect(find({ ...beneath, executableName: "node", command: "node -e 'require(\"/usr/local/bin/claude\")'" })).toBe(10);
     expect(find({ pid: 11, ppid: 10, pgid: 11, executableName: "claude", command: "claude mcp serve" })).toBe(10);
   });
 });
