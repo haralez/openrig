@@ -88,6 +88,26 @@ describe("joined native Codex identity", () => {
     expect(findExactNativeResumeProcess([{ pid: 10, ppid: 1, command: `claude --resume ${token}` }], 10, "claude-code", token)?.pid).toBe(10);
     expect(findExactNativeResumeProcess([{ pid: 10, ppid: 1, command: "claude --resume wrong" }], 10, "claude-code", token)).toBeNull();
   });
+  // #1080 maintainer review of 6e36b94d: a recorded rotation proves only with no Claude, of any
+  // runtime shape, beneath the launched process in its foreground.
+  it("refuses a recorded rotation with any shape of Claude beneath it in the foreground", () => {
+    const rotated = "00000000-0000-4000-8000-000000001077";
+    const startedAt = "Thu Oct  1 05:53:16 2026";
+    const rotation = { token, process: { pid: 10, startedAt } };
+    const top = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "claude", command: `claude --resume ${token}`, startedAt };
+    const find = (child?: NativeProcessRow) => findExactNativeResumeProcess(child ? [top, child] : [top], 10, "claude-code", rotated, rotation)?.pid ?? null;
+    expect(find()).toBe(10);
+    const beneath = { pid: 11, ppid: 10, pgid: 10 };
+    for (const child of [
+      { ...beneath, executableName: "node", command: "node /usr/local/bin/claude --resume other" },
+      { ...beneath, executableName: "node", command: "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js -p hi" },
+      { ...beneath, command: "claude --resume other" },
+      { pid: 11, ppid: 10, command: "/opt/claude.exe --resume other" },
+    ]) expect(find(child), child.command).toBeNull();
+    // Not Claude, or not in the foreground: the launched process still proves.
+    expect(find({ ...beneath, executableName: "node", command: "node relay.cjs" })).toBe(10);
+    expect(find({ pid: 11, ppid: 10, pgid: 11, executableName: "claude", command: "claude mcp serve" })).toBe(10);
+  });
 });
 
 describe("observeClaudePaneStartedAt", () => {

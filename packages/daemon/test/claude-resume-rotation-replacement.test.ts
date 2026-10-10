@@ -53,6 +53,9 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     ["first-hook", "same"], ["late-hook", "same"],
     ["first-hook", "replaced"], ["late-hook", "replaced"],
     ["first-hook", "deeper-third"],
+    // #1080 maintainer review of 6e36b94d: Claude run by Node (argv[1] is the claude script), and
+    // an older process entry with no OS executable name or process group, are Claude beneath too.
+    ["first-hook", "deeper-node-hosted"], ["first-hook", "deeper-no-os-name"],
     // dev-review's reproduction against 21c55946: the replacement comes before the late hook, so
     // that hook is the replacement's own; only the launch's own observation tells them apart.
     ["late-hook", "replaced-before-hook"],
@@ -129,11 +132,16 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
       || (after === "replaced-during-readiness" && readinessSamples > 1);
     const claude = (pid: number, ppid: number, conversation: string, began: string) =>
       ({ pid, ppid, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${conversation} --name ${name}`, startedAt: began });
+    const deeper = () => after === "deeper-node-hosted"
+      ? { ...claude(103, 102, third, "Thu Oct  1 06:10:00 2026"), executableName: "node", command: `node /usr/local/bin/claude --resume ${third}` }
+      : after === "deeper-no-os-name"
+        ? { pid: 103, ppid: 102, command: `claude --resume ${third}` }
+        : claude(103, 102, third, "Thu Oct  1 06:10:00 2026");
     const paneRows = () => [
       { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
       { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt },
       ...(replaced() ? [claude(202, 101, token, "Thu Oct  1 06:10:00 2026")] : [claude(102, 101, token, startedAt)]),
-      ...(phase === "after" && after === "deeper-third" ? [claude(103, 102, third, "Thu Oct  1 06:10:00 2026")] : []),
+      ...(phase === "after" && after.startsWith("deeper") ? [deeper()] : []),
     ];
     const listProcesses = async () => paneRows();
     // The relay of a SessionStart hook runs under the pane's Claude through a shell.
@@ -187,11 +195,12 @@ describe("a recorded Claude resume rotation after the qualifying process", () =>
     const same = after === "same";
     expect(cleared.status, JSON.stringify(clearBody)).toBe(same ? 200 : 422);
     expect(strict.ok, JSON.stringify(strict)).toBe(same);
-    if (after === "deeper-third") {
+    if (after.startsWith("deeper")) {
       // The pane label and screen are main's own evidence (no rotation involved), so only the
       // restore proof is in question here; two Claude conversations are a delivery conflict.
       expect(strict).toMatchObject({ code: "process_lineage_mismatch" });
-      expect(sent.ok && !warning).toBe(false);
+      // Delivery's own foreground-conflict check is main's and recognises a native Claude only.
+      if (after === "deeper-third") expect(sent.ok && !warning).toBe(false);
       return;
     }
     expect(identity?.verdict, JSON.stringify(identity)).toBe(same ? "verified" : "mismatch");

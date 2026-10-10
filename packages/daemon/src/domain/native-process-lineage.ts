@@ -255,10 +255,22 @@ function claudeBeneath(top: NativeProcessRow, byParent: Map<number, NativeProces
     const row = queue.shift()!;
     if (seen.has(row.pid)) continue;
     seen.add(row.pid);
-    if (row.pgid === top.tpgid && claudeProcess(row)) return true;
+    // An unknown process group may be the foreground one.
+    const foreground = row.pgid === undefined || top.tpgid === undefined || row.pgid === top.tpgid;
+    if (foreground && claudeRuntime(row)) return true;
     queue.push(...(byParent.get(row.pid) ?? []));
   }
   return false;
+}
+
+/** Any process that may be a Claude runtime. This only refuses a proof, so it is broader than the
+ *  identity check: a verified native Claude, any argv0 naming claude (including an older entry with
+ *  no OS executable name), and Node running the claude script as argv[1]. */
+function claudeRuntime(row: NativeProcessRow): boolean {
+  if (claudeProcess(row)) return true;
+  const [argv0 = "", argv1 = ""] = tokens(row.command);
+  if (claudeExecutable(argv0)) return true;
+  return executableName(argv0) === "node" && (claudeExecutable(argv1) || /\/@anthropic-ai\/claude-code\/cli\.m?js$/.test(argv1));
 }
 
 /** The same OS observation serves menu input, restore proof and periodic identity.
