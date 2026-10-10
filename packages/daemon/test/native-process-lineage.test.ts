@@ -103,19 +103,33 @@ describe("joined native Codex identity", () => {
       { ...beneath, executableName: "node", command: "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js -p hi" },
       { ...beneath, executableName: "node", command: "node --no-warnings /usr/local/bin/claude --resume other" },
       { ...beneath, executableName: "node", command: "node -r ./preload.cjs --max-old-space-size=4096 -- /usr/local/bin/claude --resume other" },
+      // Node's options are not parsed, so a value option the guard does not know cannot hide Claude
+      // (maintainer, against 8208c721), and a claude path given to -r or after -e refuses too.
+      { ...beneath, executableName: "node", command: "node --max-old-space-size 8192 /usr/local/bin/claude --session-id other" },
+      { ...beneath, executableName: "node", command: "node --diagnostic-dir /tmp/d /usr/local/bin/claude --session-id other" },
+      { ...beneath, executableName: "node", command: "node --stack-size 4000 /usr/lib/node_modules/@anthropic-ai/claude-code/cli.mjs" },
+      { ...beneath, executableName: "node", command: "node -r /usr/local/bin/claude relay.cjs" },
+      { ...beneath, executableName: "node", command: "node --no-warnings -e 1 /usr/local/bin/claude" },
       { ...beneath, command: "claude --resume other" },
       { pid: 11, ppid: 10, command: "/opt/claude.exe --resume other" },
     ]) expect(find(child), child.command).toBeNull();
     // Not Claude, or not in the foreground: the launched process still proves.
     expect(find({ ...beneath, executableName: "node", command: "node relay.cjs" })).toBe(10);
-    expect(find({ ...beneath, executableName: "node", command: "node -r /usr/local/bin/claude relay.cjs" })).toBe(10);
     expect(find({ ...beneath, executableName: "node", command: "node -e 'require(\"/usr/local/bin/claude\")'" })).toBe(10);
-    // Node runs no script file here, so a claude path after it is data (dev-review against 8208c721).
-    for (const command of ["node --eval=setInterval(()=>{},1000) /usr/local/bin/claude", "node - /usr/local/bin/claude",
-      "node -pe 1 /usr/local/bin/claude", "node --print=1 /usr/local/bin/claude", "node --no-warnings -e 1 /usr/local/bin/claude"]) {
-      expect(find({ ...beneath, executableName: "node", command }), command).toBe(10);
-    }
     expect(find({ pid: 11, ppid: 10, pgid: 11, executableName: "claude", command: "claude mcp serve" })).toBe(10);
+  });
+
+  // A foreground group of -1 or 0 (no controlling terminal) is unknown, not a group no child is in.
+  it("refuses a recorded rotation over a Claude child when the launched process's foreground group reads -1 or 0", () => {
+    const rotated = "00000000-0000-4000-8000-000000001077";
+    const startedAt = "Thu Oct  1 05:53:16 2026";
+    const rotation = { token, process: { pid: 10, startedAt } };
+    const child = { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: "claude", command: "claude --resume other", startedAt };
+    for (const tpgid of [-1, 0]) {
+      const top = { pid: 10, ppid: 1, pgid: 10, tpgid, executableName: "claude", command: `claude --resume ${token}`, startedAt };
+      expect(findExactNativeResumeProcess([top, child], 10, "claude-code", rotated, rotation)?.pid ?? null, String(tpgid)).toBeNull();
+      expect(findExactNativeResumeProcess([top], 10, "claude-code", rotated, rotation)?.pid ?? null, String(tpgid)).toBe(10);
+    }
   });
 });
 

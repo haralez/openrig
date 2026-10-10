@@ -255,8 +255,8 @@ function claudeBeneath(top: NativeProcessRow, byParent: Map<number, NativeProces
     const row = queue.shift()!;
     if (seen.has(row.pid)) continue;
     seen.add(row.pid);
-    // An unknown process group may be the foreground one.
-    const foreground = row.pgid === undefined || top.tpgid === undefined || row.pgid === top.tpgid;
+    // An unknown process group may be the foreground one; a foreground group of -1 or 0 is unknown.
+    const foreground = row.pgid === undefined || top.tpgid === undefined || top.tpgid <= 0 || row.pgid === top.tpgid;
     if (foreground && claudeRuntime(row)) return true;
     queue.push(...(byParent.get(row.pid) ?? []));
   }
@@ -265,32 +265,14 @@ function claudeBeneath(top: NativeProcessRow, byParent: Map<number, NativeProces
 
 /** Any process that may be a Claude runtime. This only refuses a proof, so it is broader than the
  *  identity check: a verified native Claude, any argv0 naming claude (including an older entry with
- *  no OS executable name), and Node running the claude script as argv[1]. */
+ *  no OS executable name), and Node with any argument naming a Claude executable or the npm
+ *  package's cli.js/cli.mjs. Node's own options are not parsed, so none can hide the script. */
 function claudeRuntime(row: NativeProcessRow): boolean {
   if (claudeProcess(row)) return true;
   const [argv0 = "", ...args] = tokens(row.command);
   if (claudeExecutable(argv0)) return true;
-  if (executableName(argv0) !== "node") return false;
-  const script = nodeScript(args);
-  return !!script && (claudeExecutable(script) || /\/@anthropic-ai\/claude-code\/cli\.m?js$/.test(script));
-}
-
-// Node options that take their value as the next argument.
-const NODE_OPTIONS_WITH_VALUE = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader",
-  "-C", "--conditions", "--env-file", "--env-file-if-exists", "--inspect-port", "--title", "--input-type"]);
-
-/** The script Node runs: the first argument after Node's own options. Null when Node runs no script
- * file: code given with -e/-p (also --eval=, --print=, and joined short flags such as -pe), stdin
- * (`-`), or no argument. Arguments after those are data, never a script. */
-function nodeScript(args: string[]): string | null {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    if (arg === "--") return args[index + 1] ?? null;
-    if (arg === "-" || /^--(?:eval|print)(?:=|$)/.test(arg) || /^-[a-zA-Z]*[ep][a-zA-Z]*$/.test(arg)) return null;
-    if (!arg.startsWith("-")) return arg;
-    if (NODE_OPTIONS_WITH_VALUE.has(arg)) index += 1;
-  }
-  return null;
+  return executableName(argv0) === "node"
+    && args.some(arg => claudeExecutable(arg) || /\/@anthropic-ai\/claude-code\/cli\.m?js$/.test(arg));
 }
 
 /** The same OS observation serves menu input, restore proof and periodic identity.
