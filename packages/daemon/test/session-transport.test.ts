@@ -561,6 +561,29 @@ describe("SessionTransport", () => {
     },
   );
 
+  it.each(["wrapped full", "wrapped wrong tail", "wrapped staged", "wrapped redraw"])(
+    "send with verify compares full envelopes across wrapping: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\n" +
+        "This long shared opening exceeds forty characters and wraps at a word boundary. Requested tail.";
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      const wrapped = rendered.replace("and wraps", "and\n  wraps");
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted
+          ? (mode === "wrapped redraw" ? rendered + "\n❯ " : "❯ ")
+          : (mode === "wrapped wrong tail" ? wrapped.replace("Requested tail.", "Other tail.") : wrapped) +
+            (mode === "wrapped staged" ? "\n────────────────────\n? for shortcuts" : "\n❯ "),
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified: mode === "wrapped full",
+        outcome: mode === "wrapped full" ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
   it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
     seedCanonicalRig();
     const message = mode === "raw" ? "Please check this task."

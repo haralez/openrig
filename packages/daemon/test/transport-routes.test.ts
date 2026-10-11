@@ -373,14 +373,16 @@ describe("transport routes", () => {
     expect(body.outcome).toBe("failed");
   });
 
-  it.each(["different body", "different long tail", "unsent input", "submitted transcript"])(
+  it.each(["different body", "different long tail", "wrapped full", "wrapped wrong tail", "unsent input", "submitted transcript"])(
     "POST /send verifies submitted message identity: %s",
     async (mode) => {
       seedRig();
       const text = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\nPlease check this task.";
-      const message = mode === "different long tail" ? text.replace("Please check this task.",
+      const message = ["different long tail", "wrapped full", "wrapped wrong tail"].includes(mode) ? text.replace("Please check this task.",
         "A shared opening longer than forty characters belongs to both messages. Requested tail.") : text;
       const rendered = "❯ " + message.split("\n").join("\n  ");
+      const wrapped = rendered.replace("belongs to both", "belongs to\n  both");
+      const expectedVerified = mode === "submitted transcript" || mode === "wrapped full";
       let submitted = false;
       const tmux = mockTmux({
         sendKeys: async () => { submitted = true; return { ok: true }; },
@@ -388,7 +390,9 @@ describe("transport routes", () => {
           : mode === "unsent input"
             ? "────────────────────\n" + rendered + "\n────────────────────\n? for shortcuts"
             : (mode === "different body" ? rendered.replace("this task", "a different task")
-              : mode === "different long tail" ? rendered.replace("Requested tail.", "Other tail.") : rendered) + "\n❯ ",
+              : mode === "different long tail" ? rendered.replace("Requested tail.", "Other tail.")
+              : mode === "wrapped wrong tail" ? wrapped.replace("Requested tail.", "Other tail.")
+              : mode === "wrapped full" ? wrapped : rendered) + "\n❯ ",
       });
       const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, sleep: async () => undefined });
       const res = await createApp({ sessionTransport: transport }).request("/api/transport/send", {
@@ -397,8 +401,8 @@ describe("transport routes", () => {
         body: JSON.stringify({ session: "dev-impl@my-rig", text: message, verify: true }),
       });
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ ok: true, verified: mode === "submitted transcript",
-        outcome: mode === "submitted transcript" ? "delivered" : "rendered-unconfirmed" });
+      expect(await res.json()).toMatchObject({ ok: true, verified: expectedVerified,
+        outcome: expectedVerified ? "delivered" : "rendered-unconfirmed" });
     },
   );
 

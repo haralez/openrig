@@ -653,12 +653,12 @@ function normalizeVerificationText(text: string): string {
   return text.replace(/\r?\n[ \t]*/g, "\n");
 }
 
-/** Match the full normalized envelope, including its entire body and recipient.
- * Raw sends retain their 40-character prefix. */
-function verificationSnippet(text: string): string {
+/** Match the full envelope with whitespace collapsed, including body and recipient.
+ * Raw sends retain their normalized 40-character prefix and spacing. */
+function verificationSnippet(text: string): { snippet: string; envelope: boolean } {
   const normalized = normalizeVerificationText(text);
   const header = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.exec(normalized);
-  return header ? normalized : normalized.slice(0, 40);
+  return { snippet: header ? normalized.replace(/\s+/g, " ").trim() : normalized.slice(0, 40), envelope: !!header };
 }
 
 /** The last prompt marker owns the current input region. Never count it or its
@@ -1643,7 +1643,8 @@ export class SessionTransport {
       try {
         preVerifyContent = await this.runStage(
           "session_transport.pre_capture",
-          () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+          () => runtime === "terminal" ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
+            : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.pre = captureSlot(preVerifyContent, this.now().toISOString(), captureSeq);
       } catch {
@@ -1731,14 +1732,18 @@ export class SessionTransport {
       try {
         const content = await this.runStage(
           "session_transport.post_capture",
-          () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+          () => runtime === "terminal" ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
+            : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);
         // A terminal prompt is command history, not an agent composer. Preserve
         // its original prefix-count verification even while a command is running.
         const terminal = runtime === "terminal";
-        const snippet = terminal ? text.slice(0, 40) : verificationSnippet(text);
-        const transcript = terminal ? (pane: string | null) => pane ?? "" : verificationTranscript;
+        const { snippet, envelope } = terminal ? { snippet: text.slice(0, 40), envelope: false } : verificationSnippet(text);
+        const transcript = (pane: string | null) => {
+          const content = terminal ? pane ?? "" : verificationTranscript(pane);
+          return envelope ? content.replace(/\s+/g, " ").trim() : content;
+        };
         const preCount = countOccurrences(transcript(preVerifyContent), snippet);
         const postCount = countOccurrences(transcript(content), snippet);
         const verified = postCount > preCount;
