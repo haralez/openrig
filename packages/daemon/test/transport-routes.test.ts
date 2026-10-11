@@ -373,7 +373,7 @@ describe("transport routes", () => {
     expect(body.outcome).toBe("failed");
   });
 
-  it.each(["different body", "different long tail", "wrapped full", "wrapped wrong tail", "unsent input", "submitted transcript"])(
+  it.each(["different body", "different long tail", "wrapped full", "wrapped wrong tail", "suffix same line", "suffix next line", "unsent input", "submitted transcript"])(
     "POST /send verifies submitted message identity: %s",
     async (mode) => {
       seedRig();
@@ -392,7 +392,9 @@ describe("transport routes", () => {
             : (mode === "different body" ? rendered.replace("this task", "a different task")
               : mode === "different long tail" ? rendered.replace("Requested tail.", "Other tail.")
               : mode === "wrapped wrong tail" ? wrapped.replace("Requested tail.", "Other tail.")
-              : mode === "wrapped full" ? wrapped : rendered) + "\n❯ ",
+              : mode === "wrapped full" ? wrapped
+              : mode === "suffix same line" ? rendered + " Extra body."
+              : mode === "suffix next line" ? rendered + "\n  Extra body." : rendered) + "\n❯ ",
       });
       const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, sleep: async () => undefined });
       const res = await createApp({ sessionTransport: transport }).request("/api/transport/send", {

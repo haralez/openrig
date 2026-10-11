@@ -661,6 +661,31 @@ function verificationSnippet(text: string): { snippet: string; envelope: boolean
   return { snippet: header ? normalized.replace(/\s+/g, " ").trim() : normalized.slice(0, 40), envelope: !!header };
 }
 
+/** Count whole visible envelope blocks, not prefixes of longer messages.
+ * A new envelope or prompt ends a block; an incomplete/ambiguous block stays
+ * unconfirmed. Whitespace is compared only after retaining these boundaries. */
+function countEnvelopeOccurrences(transcript: string, expected: string): number {
+  let count = 0;
+  let block: string[] | null = null;
+  const finish = () => {
+    if (block?.join("\n").replace(/\s+/g, " ").trim() === expected) count++;
+    block = null;
+  };
+  for (const line of transcript.split("\n")) {
+    const header = line.replace(/^[❯›]\s+/, "");
+    if (header.startsWith("From: ")) {
+      finish();
+      block = [header];
+    } else if (/^[❯›](?:\s|$)/.test(line)) {
+      finish();
+    } else if (block) {
+      block.push(line);
+    }
+  }
+  finish();
+  return count;
+}
+
 /** The last prompt marker owns the current input region. Never count it or its
  * continuation lines as submitted transcript, in either capture. If a capture
  * ends at a historical prompt with no later input marker, leave it unconfirmed. */
@@ -1740,12 +1765,10 @@ export class SessionTransport {
         // its original prefix-count verification even while a command is running.
         const terminal = runtime === "terminal";
         const { snippet, envelope } = terminal ? { snippet: text.slice(0, 40), envelope: false } : verificationSnippet(text);
-        const transcript = (pane: string | null) => {
-          const content = terminal ? pane ?? "" : verificationTranscript(pane);
-          return envelope ? content.replace(/\s+/g, " ").trim() : content;
-        };
-        const preCount = countOccurrences(transcript(preVerifyContent), snippet);
-        const postCount = countOccurrences(transcript(content), snippet);
+        const transcript = terminal ? (pane: string | null) => pane ?? "" : verificationTranscript;
+        const count = envelope ? countEnvelopeOccurrences : countOccurrences;
+        const preCount = count(transcript(preVerifyContent), snippet);
+        const postCount = count(transcript(content), snippet);
         const verified = postCount > preCount;
         return observe({ ok: true, sessionName, ...interaction, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {

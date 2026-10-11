@@ -584,6 +584,31 @@ describe("SessionTransport", () => {
     },
   );
 
+  it.each(["same-line suffix", "next-line suffix", "exact block", "canonical suffix", "canonical exact", "footer suffix"])(
+    "send with verify counts complete envelope blocks: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const header = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\n";
+      const footer = "\n---\n↩ Reply: rig send sender-agent@demo \"...\"";
+      const canonical = mode.startsWith("canonical") || mode === "footer suffix";
+      const message = header + "Requested body." + (canonical ? footer : "");
+      let rendered = message;
+      if (mode === "same-line suffix") rendered += " Extra body.";
+      if (mode === "next-line suffix") rendered += "\nExtra body.";
+      if (mode === "canonical suffix") rendered = rendered.replace("Requested body.", "Requested body. Extra body.");
+      if (mode === "footer suffix") rendered += " Extra footer text.";
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " : "❯ " + rendered.split("\n").join("\n  ") + "\n❯ ",
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      const verified = mode === "exact block" || mode === "canonical exact";
+      expect(result).toMatchObject({ ok: true, verified, outcome: verified ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
   it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
     seedCanonicalRig();
     const message = mode === "raw" ? "Please check this task."
