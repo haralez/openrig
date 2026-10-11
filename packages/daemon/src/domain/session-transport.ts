@@ -662,7 +662,7 @@ function verificationSnippet(text: string): { snippet: string; envelope: boolean
 }
 
 /** Count whole visible envelope blocks, not prefixes of longer messages.
- * A new envelope, prompt or same-column provider output ends a block.
+ * A new envelope, prompt or same-column output ends an indented user block.
  * Whitespace is compared only after retaining boundaries and quote indentation. */
 function countEnvelopeOccurrences(transcript: string, expected: string): number {
   const lines = transcript.split("\n");
@@ -687,12 +687,13 @@ function countEnvelopeOccurrences(transcript: string, expected: string): number 
       finish();
       block = [header];
       blockIndent = indent;
-      blockPrompted = prompted;
+      // Flat historical captures have no role columns; retain whole-block
+      // equality there instead of treating their own header/body as output.
+      blockPrompted = prompted && /^[ \t]*/.exec(lines[i + 1] ?? "")![0].length > indent;
       inAgentOutput = false;
-    } else if (atBoundary && blockPrompted &&
-        (/^[⏺●•◦✶✢✳✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s/.test(line.slice(indent)) || CLAUDE_LIVE_STATUS_PATTERN.test(line.slice(indent)))) {
-      // Provider output is outside a prompt-marked user block. Indented quotes
-      // stay in the body; plain envelopes cannot grant role-marker authority.
+    } else if (atBoundary && blockPrompted && line.trim().length > 0) {
+      // Any nonblank boundary line is outside an indented user block. Deeper
+      // quotes stay in the body, and blank separators do not change its text.
       finish();
       inAgentOutput = true;
     } else if (atBoundary && /^[❯›](?:\s|$)/.test(line.slice(indent))) {
@@ -1695,7 +1696,7 @@ export class SessionTransport {
       try {
         preVerifyContent = await this.runStage(
           "session_transport.pre_capture",
-          () => runtime === "terminal" ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
+          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
             : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.pre = captureSlot(preVerifyContent, this.now().toISOString(), captureSeq);
@@ -1784,7 +1785,7 @@ export class SessionTransport {
       try {
         const content = await this.runStage(
           "session_transport.post_capture",
-          () => runtime === "terminal" ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
+          () => runtime === "terminal" || !verificationSnippet(text).envelope ? this.tmuxAdapter.capturePaneContent(sessionName, 30)
             : this.tmuxAdapter.capturePaneContent(sessionName, 30, { joinWrappedLines: true }),
         );
         if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);

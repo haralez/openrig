@@ -373,7 +373,7 @@ describe("transport routes", () => {
     expect(body.outcome).toBe("failed");
   });
 
-  it.each(["different body", "different long tail", "wrapped full", "wrapped wrong tail", "suffix same line", "suffix next line", "agent reply", "quoted reply", "unsent input", "submitted transcript"])(
+  it.each(["different body", "different long tail", "wrapped full", "wrapped wrong tail", "suffix same line", "suffix next line", "agent reply", "plain assistant output", "thinking before framed composer", "quoted reply", "unsent input", "submitted transcript"])(
     "POST /send verifies submitted message identity: %s",
     async (mode) => {
       seedRig();
@@ -382,13 +382,15 @@ describe("transport routes", () => {
         "A shared opening longer than forty characters belongs to both messages. Requested tail.") : text;
       const rendered = "❯ " + message.split("\n").join("\n  ");
       const wrapped = rendered.replace("belongs to both", "belongs to\n  both");
-      const expectedVerified = mode === "submitted transcript" || mode === "wrapped full" || mode === "agent reply";
+      const expectedVerified = ["submitted transcript", "wrapped full", "agent reply", "plain assistant output", "thinking before framed composer"].includes(mode);
       let submitted = false;
       const tmux = mockTmux({
         sendKeys: async () => { submitted = true; return { ok: true }; },
         capturePaneContent: async () => !submitted ? "idle\n❯ "
           : mode === "unsent input"
             ? "────────────────────\n" + rendered + "\n────────────────────\n? for shortcuts"
+            : mode === "thinking before framed composer"
+              ? rendered + "\n\n✻ Thinking… (esc to interrupt)\n\n────────────────────\n❯ \n────────────────────\n? for shortcuts"
             : (mode === "different body" ? rendered.replace("this task", "a different task")
               : mode === "different long tail" ? rendered.replace("Requested tail.", "Other tail.")
               : mode === "wrapped wrong tail" ? wrapped.replace("Requested tail.", "Other tail.")
@@ -396,6 +398,7 @@ describe("transport routes", () => {
               : mode === "suffix same line" ? rendered + " Extra body."
               : mode === "suffix next line" ? rendered + "\n  Extra body."
               : mode === "agent reply" ? rendered + "\n⏺ Agent reply"
+              : mode === "plain assistant output" ? rendered.replace(/^❯/, "›") + "\nAssistant output without a role glyph"
               : mode === "quoted reply" ? rendered + "\n  ⏺ extra quoted body" : rendered) + "\n❯ ",
       });
       const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, sleep: async () => undefined });

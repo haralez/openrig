@@ -632,7 +632,7 @@ describe("SessionTransport", () => {
     },
   );
 
-  it.each(["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Codex reply", "Codex status", "quoted reply suffix", "quoted status suffix", "plain suffix", "assistant quotes envelope", "assistant quotes prompt then envelope", "next incoming after reply"])(
+  it.each(["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Claude thinking", "Codex plain output", "blank-separated reply", "Codex reply", "Codex status", "quoted reply suffix", "quoted status suffix", "plain suffix", "assistant quotes envelope", "assistant quotes prompt then envelope", "next incoming after reply"])(
     "send with verify separates user envelopes from agent output: %s",
     async (mode) => {
       seedCanonicalRig();
@@ -641,9 +641,13 @@ describe("SessionTransport", () => {
       const marker = mode === "Claude status" ? "✻ Working… (2s · thinking)"
         : mode === "Claude spinner" ? "⠋ Processing"
         : mode === "Claude dotted status" ? "· Working… (2s · thinking)"
+        : mode === "Claude thinking" ? "✻ Thinking… (esc to interrupt)"
+        : mode === "Codex plain output" ? "Assistant output without a role glyph"
         : mode === "Codex reply" ? "• Agent reply"
         : mode === "Codex status" ? "◦ Working (2s • esc to interrupt)" : "⏺ Agent reply";
       let output = render(message) + "\n" + marker;
+      if (mode === "Codex plain output") output = output.replace(/^❯/, "›");
+      if (mode === "Claude thinking" || mode === "blank-separated reply") output = render(message) + "\n\n" + marker + "\n";
       if (mode === "quoted reply suffix") output = render(message + "\n⏺ quoted reply");
       if (mode === "quoted status suffix") output = render(message + "\n◦ Working (2s • esc to interrupt)");
       if (mode === "plain suffix") output = message + "\n⏺ extra plain body";
@@ -657,10 +661,29 @@ describe("SessionTransport", () => {
       });
       const result = await createTransport(tmux, { sleep: async () => undefined })
         .send("dev-impl@my-rig", message, { verify: true });
-      const verified = ["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Codex reply", "Codex status", "next incoming after reply"].includes(mode);
+      const verified = ["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Claude thinking", "Codex plain output", "blank-separated reply", "Codex reply", "Codex status", "next incoming after reply"].includes(mode);
       expect(result).toMatchObject({ ok: true, verified, outcome: verified ? "delivered" : "rendered-unconfirmed" });
     },
   );
+
+  it("send with verify keeps raw multiline captures free of joined-line padding", async () => {
+    seedCanonicalRig();
+    const message = "First logical line.\nSecond logical line crosses forty characters.";
+    let submitted = false;
+    const captures: unknown[] = [];
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async (_session, _lines, options) => {
+        captures.push(options);
+        const first = options?.joinWrappedLines ? "First logical line.          " : "First logical line.";
+        return !submitted ? "❯ " : "❯ " + first + "\n  Second logical line crosses forty characters.\n❯ ";
+      },
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined })
+      .send("dev-impl@my-rig", message, { verify: true });
+    expect(result).toMatchObject({ ok: true, verified: true, outcome: "delivered" });
+    expect(captures.every(options => options === undefined)).toBe(true);
+  });
 
   it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
     seedCanonicalRig();
