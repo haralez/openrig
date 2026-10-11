@@ -373,25 +373,28 @@ describe("transport routes", () => {
     expect(body.outcome).toBe("failed");
   });
 
-  it.each(["different body", "unsent input", "submitted transcript"])(
+  it.each(["different body", "different long tail", "unsent input", "submitted transcript"])(
     "POST /send verifies submitted message identity: %s",
     async (mode) => {
       seedRig();
       const text = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\nPlease check this task.";
-      const rendered = "❯ " + text.split("\n").join("\n  ");
+      const message = mode === "different long tail" ? text.replace("Please check this task.",
+        "A shared opening longer than forty characters belongs to both messages. Requested tail.") : text;
+      const rendered = "❯ " + message.split("\n").join("\n  ");
       let submitted = false;
       const tmux = mockTmux({
         sendKeys: async () => { submitted = true; return { ok: true }; },
         capturePaneContent: async () => !submitted ? "idle\n❯ "
           : mode === "unsent input"
             ? "────────────────────\n" + rendered + "\n────────────────────\n? for shortcuts"
-            : (mode === "different body" ? rendered.replace("this task", "a different task") : rendered) + "\n❯ ",
+            : (mode === "different body" ? rendered.replace("this task", "a different task")
+              : mode === "different long tail" ? rendered.replace("Requested tail.", "Other tail.") : rendered) + "\n❯ ",
       });
       const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, sleep: async () => undefined });
       const res = await createApp({ sessionTransport: transport }).request("/api/transport/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session: "dev-impl@my-rig", text, verify: true }),
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: message, verify: true }),
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ ok: true, verified: mode === "submitted transcript",

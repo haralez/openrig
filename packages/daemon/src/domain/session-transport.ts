@@ -653,12 +653,12 @@ function normalizeVerificationText(text: string): string {
   return text.replace(/\r?\n[ \t]*/g, "\n");
 }
 
-/** Include body identity in an envelope match, retaining the header so another
- * recipient cannot confirm this send. Raw sends retain their 40-character prefix. */
+/** Match the full normalized envelope, including its entire body and recipient.
+ * Raw sends retain their 40-character prefix. */
 function verificationSnippet(text: string): string {
   const normalized = normalizeVerificationText(text);
   const header = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.exec(normalized);
-  return normalized.slice(0, (header?.[0].length ?? 0) + 40);
+  return header ? normalized : normalized.slice(0, 40);
 }
 
 /** The last prompt marker owns the current input region. Never count it or its
@@ -1282,8 +1282,8 @@ export class SessionTransport {
   }
 
   /** Deliver text and Enter to the resolved recipient under the send guards.
-   * With verification requested, compare message-bearing transcript counts
-   * outside current input; a confirmed render does not prove agent consumption. */
+   * With verification requested, compare rendered message counts, excluding
+   * agent input; a confirmed render does not prove agent consumption. */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) return this.sendUnguarded(sessionName, text, opts);
@@ -1734,9 +1734,13 @@ export class SessionTransport {
           () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
         );
         if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);
-        const snippet = verificationSnippet(text);
-        const preCount = countOccurrences(verificationTranscript(preVerifyContent), snippet);
-        const postCount = countOccurrences(verificationTranscript(content), snippet);
+        // A terminal prompt is command history, not an agent composer. Preserve
+        // its original prefix-count verification even while a command is running.
+        const terminal = runtime === "terminal";
+        const snippet = terminal ? text.slice(0, 40) : verificationSnippet(text);
+        const transcript = terminal ? (pane: string | null) => pane ?? "" : verificationTranscript;
+        const preCount = countOccurrences(transcript(preVerifyContent), snippet);
+        const postCount = countOccurrences(transcript(content), snippet);
         const verified = postCount > preCount;
         return observe({ ok: true, sessionName, ...interaction, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {

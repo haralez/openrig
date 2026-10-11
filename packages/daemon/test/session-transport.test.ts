@@ -540,6 +540,27 @@ describe("SessionTransport", () => {
     },
   );
 
+  it.each(["different tail", "full message", "truncated message"])(
+    "send with verify compares the full envelope after a long shared opening: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\n" +
+        "A shared opening longer than forty characters belongs to both messages.\nRequested tail.";
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " :
+          (mode === "different tail" ? rendered.replace("Requested tail.", "Other tail.")
+            : mode === "truncated message" ? rendered.split("\n").slice(0, -1).join("\n") : rendered) + "\n❯ ",
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified: mode === "full message",
+        outcome: mode === "full message" ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
   it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
     seedCanonicalRig();
     const message = mode === "raw" ? "Please check this task."
