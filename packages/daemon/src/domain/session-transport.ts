@@ -665,18 +665,26 @@ function verificationSnippet(text: string): { snippet: string; envelope: boolean
  * A new envelope or prompt ends a block; an incomplete/ambiguous block stays
  * unconfirmed. Whitespace is compared only after retaining these boundaries. */
 function countEnvelopeOccurrences(transcript: string, expected: string): number {
+  const lines = transcript.split("\n");
   let count = 0;
   let block: string[] | null = null;
+  let blockIndent = 0;
   const finish = () => {
     if (block?.join("\n").replace(/\s+/g, " ").trim() === expected) count++;
     block = null;
   };
-  for (const line of transcript.split("\n")) {
-    const header = line.replace(/^[❯›]\s+/, "");
-    if (header.startsWith("From: ")) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const indent = /^[ \t]*/.exec(line)![0].length;
+    const header = line.slice(indent).replace(/^[❯›]\s+/, "");
+    const atBoundary = !block || indent <= blockIndent;
+    const candidate = normalizeVerificationText([header, ...lines.slice(i + 1, i + 5)].join("\n"));
+    const envelopeHeader = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.test(candidate);
+    if (atBoundary && envelopeHeader) {
       finish();
       block = [header];
-    } else if (/^[❯›](?:\s|$)/.test(line)) {
+      blockIndent = indent;
+    } else if (atBoundary && /^[❯›](?:\s|$)/.test(line.slice(indent))) {
       finish();
     } else if (block) {
       block.push(line);
@@ -690,7 +698,7 @@ function countEnvelopeOccurrences(transcript: string, expected: string): number 
  * continuation lines as submitted transcript, in either capture. If a capture
  * ends at a historical prompt with no later input marker, leave it unconfirmed. */
 function verificationTranscript(content: string | null): string {
-  const lines = (content ?? "").split("\n");
+  const lines = (content ?? "").replace(/\r\n/g, "\n").split("\n");
   let inputAt = lastPromptLine(lines);
   if (inputAt >= 0) {
     let indent = /^[ \t]*/.exec(lines[inputAt]!)![0].length;
@@ -704,7 +712,15 @@ function verificationTranscript(content: string | null): string {
       }
     }
   }
-  return normalizeVerificationText((inputAt < 0 ? lines : lines.slice(0, inputAt)).join("\n"));
+  // A visible framed composer starts at its upper rule, not its prompt.
+  // Keep quoted/indented rules in the message; require a matching lower frame.
+  if (inputAt > 0) {
+    const indent = /^[ \t]*/.exec(lines[inputAt]!)![0];
+    const frame = (line: string) => line.startsWith(indent) &&
+      /^─{3,}(?: .+ ─+)?$/.test(line.slice(indent.length).trimEnd());
+    if (frame(lines[inputAt - 1]!) && lines.slice(inputAt + 1).some(frame)) inputAt--;
+  }
+  return (inputAt < 0 ? lines : lines.slice(0, inputAt)).join("\n");
 }
 
 /** Map a resolved fan-out target + its recipient list → the EnvelopeScope (ruling 03c35295). The
@@ -1765,7 +1781,8 @@ export class SessionTransport {
         // its original prefix-count verification even while a command is running.
         const terminal = runtime === "terminal";
         const { snippet, envelope } = terminal ? { snippet: text.slice(0, 40), envelope: false } : verificationSnippet(text);
-        const transcript = terminal ? (pane: string | null) => pane ?? "" : verificationTranscript;
+        const transcript = terminal ? (pane: string | null) => pane ?? ""
+          : envelope ? verificationTranscript : (pane: string | null) => normalizeVerificationText(verificationTranscript(pane));
         const count = envelope ? countEnvelopeOccurrences : countOccurrences;
         const preCount = count(transcript(preVerifyContent), snippet);
         const postCount = count(transcript(content), snippet);

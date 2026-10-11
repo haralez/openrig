@@ -609,6 +609,29 @@ describe("SessionTransport", () => {
     },
   );
 
+  it.each(["From suffix", "Claude quote suffix", "Codex quote suffix", "empty framed input", "quoted framed draft"])(
+    "send with verify retains columns at envelope and composer boundaries: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\n---\nRequested body.\n---\n↩ Reply: rig send sender-agent@demo \"...\"";
+      const suffix = mode === "From suffix" ? "\nFrom: extra body text"
+        : mode === "Claude quote suffix" ? "\n❯ extra quoted body"
+        : mode === "Codex quote suffix" ? "\n› extra quoted body" : "";
+      const rendered = "❯ " + (message + suffix).split("\n").join("\n  ");
+      const framed = "\n────────────────────\n❯ " + (mode === "quoted framed draft" ? "draft\n  ❯ quoted prompt" : "") +
+        "\n────────────────────\n? for shortcuts";
+      const verified = mode === "empty framed input" || mode === "quoted framed draft";
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " : rendered + (verified ? framed : "\n❯ "),
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified, outcome: verified ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
   it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
     seedCanonicalRig();
     const message = mode === "raw" ? "Please check this task."
