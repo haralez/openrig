@@ -653,6 +653,35 @@ function normalizeVerificationText(text: string): string {
   return text.replace(/\r?\n[ \t]*/g, "\n");
 }
 
+/** Include body identity in an envelope match, retaining the header so another
+ * recipient cannot confirm this send. Raw sends retain their 40-character prefix. */
+function verificationSnippet(text: string): string {
+  const normalized = normalizeVerificationText(text);
+  const header = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.exec(normalized);
+  return normalized.slice(0, (header?.[0].length ?? 0) + 40);
+}
+
+/** The last prompt marker owns the current input region. Never count it or its
+ * continuation lines as submitted transcript, in either capture. If a capture
+ * ends at a historical prompt with no later input marker, leave it unconfirmed. */
+function verificationTranscript(content: string | null): string {
+  const lines = (content ?? "").split("\n");
+  let inputAt = lastPromptLine(lines);
+  if (inputAt >= 0) {
+    let indent = /^[ \t]*/.exec(lines[inputAt]!)![0].length;
+    // Claude indents draft continuation lines. A quoted prompt on one of them
+    // belongs to the enclosing input, not a new transcript/composer boundary.
+    for (let i = inputAt - 1; i >= 0; i--) {
+      const prompt = /^([ \t]*)[❯›]/.exec(lines[i]!);
+      if (prompt && prompt[1]!.length < indent) {
+        inputAt = i;
+        indent = prompt[1]!.length;
+      }
+    }
+  }
+  return normalizeVerificationText((inputAt < 0 ? lines : lines.slice(0, inputAt)).join("\n"));
+}
+
 /** Map a resolved fan-out target + its recipient list → the EnvelopeScope (ruling 03c35295). The
  *  transport knows the target shape + resolved seats, so it builds the honest scale daemon-side:
  *  DM / multi (full list) / rig- or pod-scoped broadcast (with seat count) / topology. */
@@ -1702,9 +1731,9 @@ export class SessionTransport {
           () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
         );
         if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);
-        const snippet = normalizeVerificationText(text).substring(0, 40);
-        const preCount = countOccurrences(normalizeVerificationText(preVerifyContent ?? ""), snippet);
-        const postCount = countOccurrences(normalizeVerificationText(content ?? ""), snippet);
+        const snippet = verificationSnippet(text);
+        const preCount = countOccurrences(verificationTranscript(preVerifyContent), snippet);
+        const postCount = countOccurrences(verificationTranscript(content), snippet);
         const verified = postCount > preCount;
         return observe({ ok: true, sessionName, ...interaction, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {

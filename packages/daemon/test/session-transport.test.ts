@@ -516,6 +516,44 @@ describe("SessionTransport", () => {
     expect(result.outcome).toBe("rendered-unconfirmed");
   });
 
+  it.each(["same envelope, different body", "unsent composer", "old transcript plus unsent copy", "quoted prompt in composer"])(
+    "send with verify rejects false confirmation: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 10-11 05:00Z\n---\nPlease check this task.";
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      const composer = "────────────────────\n" + rendered +
+        (mode === "quoted prompt in composer" ? "\n  ❯ quoted prompt" : "") + "\n────────────────────\n? for shortcuts";
+      const prior = mode === "old transcript plus unsent copy" ? rendered + "\n" : "";
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => prior + (submitted
+          ? mode === "same envelope, different body"
+            ? rendered.replace("Please check this task.", "Please check a different task.") + "\n❯ "
+            : composer
+          : "❯ "),
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
+    },
+  );
+
+  it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
+    seedCanonicalRig();
+    const message = mode === "raw" ? "Please check this task."
+      : "From: sender-agent@demo\nTo: dev-impl@my-rig\n---\nPlease check this task.";
+    let submitted = false;
+    const tmux = mockTmux({
+      sendKeys: async () => { submitted = true; return { ok: true }; },
+      capturePaneContent: async () => submitted ? "❯ " + message.split("\n").join("\n  ") : "❯ ",
+    });
+    const result = await createTransport(tmux, { sleep: async () => undefined })
+      .send("dev-impl@my-rig", message, { verify: true });
+    expect(result).toMatchObject({ ok: true, verified: false, outcome: "rendered-unconfirmed" });
+  });
+
   // OPR.99.0.6.3 — honest delivery-outcome vocabulary
   it("verify capture throwing after a successful send is the middle outcome, not a failure", async () => {
     seedCanonicalRig();
