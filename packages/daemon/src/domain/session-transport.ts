@@ -644,9 +644,11 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
-// Claude indents continuation lines in submitted prompts. Compare the same
-// line content in the sent text and both captures, retaining line breaks and
-// within-line spacing rather than allowing unrelated words to match.
+/**
+ * Claude indents continuation lines in submitted prompts. Compare the same
+ * line content in the sent text and both captures, retaining line breaks and
+ * within-line spacing rather than allowing unrelated words to match.
+ */
 function normalizeVerificationText(text: string): string {
   return text.replace(/\r?\n[ \t]*/g, "\n");
 }
