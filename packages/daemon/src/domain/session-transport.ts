@@ -662,13 +662,15 @@ function verificationSnippet(text: string): { snippet: string; envelope: boolean
 }
 
 /** Count whole visible envelope blocks, not prefixes of longer messages.
- * A new envelope or prompt ends a block; an incomplete/ambiguous block stays
- * unconfirmed. Whitespace is compared only after retaining these boundaries. */
+ * A new envelope, prompt or same-column provider output ends a block.
+ * Whitespace is compared only after retaining boundaries and quote indentation. */
 function countEnvelopeOccurrences(transcript: string, expected: string): number {
   const lines = transcript.split("\n");
   let count = 0;
   let block: string[] | null = null;
   let blockIndent = 0;
+  let blockPrompted = false;
+  let inAgentOutput = false;
   const finish = () => {
     if (block?.join("\n").replace(/\s+/g, " ").trim() === expected) count++;
     block = null;
@@ -676,14 +678,23 @@ function countEnvelopeOccurrences(transcript: string, expected: string): number 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     const indent = /^[ \t]*/.exec(line)![0].length;
+    const prompted = /^[❯›]\s+/.test(line.slice(indent));
     const header = line.slice(indent).replace(/^[❯›]\s+/, "");
-    const atBoundary = !block || indent <= blockIndent;
+    const atBoundary = (!block && !inAgentOutput) || indent <= blockIndent;
     const candidate = normalizeVerificationText([header, ...lines.slice(i + 1, i + 5)].join("\n"));
     const envelopeHeader = /^From: [^\n]+\nTo: [^\n]+\n(?:Sent: [^\n]+\n)?---\n/.test(candidate);
-    if (atBoundary && envelopeHeader) {
+    if (atBoundary && envelopeHeader && (!inAgentOutput || prompted)) {
       finish();
       block = [header];
       blockIndent = indent;
+      blockPrompted = prompted;
+      inAgentOutput = false;
+    } else if (atBoundary && blockPrompted &&
+        (/^[⏺●•◦✶✢✳✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s/.test(line.slice(indent)) || CLAUDE_LIVE_STATUS_PATTERN.test(line.slice(indent)))) {
+      // Provider output is outside a prompt-marked user block. Indented quotes
+      // stay in the body; plain envelopes cannot grant role-marker authority.
+      finish();
+      inAgentOutput = true;
     } else if (atBoundary && /^[❯›](?:\s|$)/.test(line.slice(indent))) {
       finish();
     } else if (block) {

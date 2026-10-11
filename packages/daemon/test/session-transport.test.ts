@@ -632,6 +632,36 @@ describe("SessionTransport", () => {
     },
   );
 
+  it.each(["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Codex reply", "Codex status", "quoted reply suffix", "quoted status suffix", "plain suffix", "assistant quotes envelope", "assistant quotes prompt then envelope", "next incoming after reply"])(
+    "send with verify separates user envelopes from agent output: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\n---\nRequested body.\n---\n↩ Reply: rig send sender-agent@demo \"...\"";
+      const render = (text: string) => "❯ " + text.split("\n").join("\n  ");
+      const marker = mode === "Claude status" ? "✻ Working… (2s · thinking)"
+        : mode === "Claude spinner" ? "⠋ Processing"
+        : mode === "Claude dotted status" ? "· Working… (2s · thinking)"
+        : mode === "Codex reply" ? "• Agent reply"
+        : mode === "Codex status" ? "◦ Working (2s • esc to interrupt)" : "⏺ Agent reply";
+      let output = render(message) + "\n" + marker;
+      if (mode === "quoted reply suffix") output = render(message + "\n⏺ quoted reply");
+      if (mode === "quoted status suffix") output = render(message + "\n◦ Working (2s • esc to interrupt)");
+      if (mode === "plain suffix") output = message + "\n⏺ extra plain body";
+      if (mode === "assistant quotes envelope") output = render(message.replace("Requested body.", "Other body.")) + "\n⏺ Agent reply\n" + message;
+      if (mode === "assistant quotes prompt then envelope") output = render(message.replace("Requested body.", "Other body.")) + "\n⏺ Agent reply\n❯ example command\n" + message;
+      if (mode === "next incoming after reply") output = render(message.replace("Requested body.", "Other body.")) + "\n⏺ Agent reply\n" + render(message);
+      let submitted = false;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => !submitted ? "❯ " : output + "\n────────────────────\n❯ \n────────────────────\n? for shortcuts",
+      });
+      const result = await createTransport(tmux, { sleep: async () => undefined })
+        .send("dev-impl@my-rig", message, { verify: true });
+      const verified = ["Claude reply", "Claude status", "Claude spinner", "Claude dotted status", "Codex reply", "Codex status", "next incoming after reply"].includes(mode);
+      expect(result).toMatchObject({ ok: true, verified, outcome: verified ? "delivered" : "rendered-unconfirmed" });
+    },
+  );
+
   it.each(["raw", "envelope without timestamp"])("send with verify excludes current input: %s", async (mode) => {
     seedCanonicalRig();
     const message = mode === "raw" ? "Please check this task."
