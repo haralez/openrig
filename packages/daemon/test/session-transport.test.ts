@@ -469,6 +469,37 @@ describe("SessionTransport", () => {
     expect(result.outcome).toBe("delivered");
   });
 
+  it.each(["new render", "unchanged render", "additional render", "indentation-only redraw", "different message"])(
+    "send with verify compares indented multiline envelopes: %s",
+    async (mode) => {
+      seedCanonicalRig();
+      const message = "From: sender-agent@demo\nTo: dev-impl@my-rig\nSent: 2026-10-11T05:00:00Z\n---\nPlease check this task.";
+      // Claude renders submitted multiline messages with two-space continuation indentation.
+      const rendered = "❯ " + message.split("\n").join("\n  ");
+      let submitted = false;
+      const prior = mode === "new render" || mode === "different message" ? "prior output"
+        : mode === "indentation-only redraw" ? "❯ " + message : rendered;
+      const tmux = mockTmux({
+        sendKeys: async () => { submitted = true; return { ok: true }; },
+        capturePaneContent: async () => {
+          if (submitted && mode === "indentation-only redraw") return rendered + "\n❯ ";
+          const added = submitted && mode !== "unchanged render" ? "\n" + (
+            mode === "different message" ? rendered.replace("To: dev-impl", "To: other-seat") : rendered
+          ) : "";
+          return prior + added + "\n❯ ";
+        },
+      });
+      const transport = createTransport(tmux, { sleep: async () => undefined });
+
+      const result = await transport.send("dev-impl@my-rig", message, { verify: true });
+
+      expect(result.ok).toBe(true);
+      const expectedVerified = mode === "new render" || mode === "additional render";
+      expect(result.verified).toBe(expectedVerified);
+      expect(result.outcome).toBe(expectedVerified ? "delivered" : "rendered-unconfirmed");
+    },
+  );
+
   it("send with verify does not false-positive on pre-existing pane content", async () => {
     seedCanonicalRig();
     const tmux = mockTmux({

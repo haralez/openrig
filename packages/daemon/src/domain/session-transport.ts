@@ -644,6 +644,13 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+// Claude indents continuation lines in submitted prompts. Compare the same
+// line content in the sent text and both captures, retaining line breaks and
+// within-line spacing rather than allowing unrelated words to match.
+function normalizeVerificationText(text: string): string {
+  return text.replace(/\r?\n[ \t]*/g, "\n");
+}
+
 /** Map a resolved fan-out target + its recipient list → the EnvelopeScope (ruling 03c35295). The
  *  transport knows the target shape + resolved seats, so it builds the honest scale daemon-side:
  *  DM / multi (full list) / rig- or pod-scoped broadcast (with seat count) / topology. */
@@ -1693,9 +1700,9 @@ export class SessionTransport {
           () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
         );
         if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);
-        const snippet = text.substring(0, Math.min(text.length, 40));
-        const preCount = countOccurrences(preVerifyContent ?? "", snippet);
-        const postCount = countOccurrences(content ?? "", snippet);
+        const snippet = normalizeVerificationText(text).substring(0, 40);
+        const preCount = countOccurrences(normalizeVerificationText(preVerifyContent ?? ""), snippet);
+        const postCount = countOccurrences(normalizeVerificationText(content ?? ""), snippet);
         const verified = postCount > preCount;
         return observe({ ok: true, sessionName, ...interaction, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {
