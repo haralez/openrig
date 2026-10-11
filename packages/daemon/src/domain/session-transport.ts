@@ -1281,6 +1281,9 @@ export class SessionTransport {
     return pref.desired || pref.effective ? target : null;
   }
 
+  /** Deliver text and Enter to the resolved recipient under the send guards.
+   * With verification requested, compare message-bearing transcript counts
+   * outside current input; a confirmed render does not prove agent consumption. */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) return this.sendUnguarded(sessionName, text, opts);
