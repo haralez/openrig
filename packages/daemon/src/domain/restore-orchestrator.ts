@@ -113,13 +113,12 @@ export function launchStatusIsRunning(status: string): boolean {
 /** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
  *  occupant, then the pre-launch stop-and-ask check, then the resume decision (restoreNodeWithCompensation and the
  *  resume step after it). An exited agent's message offers stop-then-launch as a resume only when this says so. */
-function snapshotLaunchOutcome(data: SnapshotData, nodeId: string):
+function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: string | null):
   { kind: "resume" } | { kind: "fresh" | "decision" | "unrecoverable"; why: string } {
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
   const session = occupant.kind === "resolved" ? occupant.session : null;
-  const node = data.nodes.find((node) => node.id === nodeId);
-  const runtimeError = restoreRuntimeCompatibilityError(node?.runtime ?? null,
+  const runtimeError = restoreRuntimeCompatibilityError(runtime,
     data.nodeStartupContext?.[nodeId]?.runtime, session, false);
   if (runtimeError) return { kind: "decision", why: runtimeError };
   if (!session) {
@@ -561,7 +560,8 @@ export class RestoreOrchestrator {
         // Choosing a fresh versus resumed conversation belongs to the person. Stopping closes the pane, so
         // stop-then-launch is offered as a resume only when this snapshot can resume the seat; otherwise the
         // message says what that launch would do instead. The command pins the snapshot that was checked.
-        const outcome = snapshotLaunchOutcome(snapshot.data, node.id);
+        const liveNode = allNodes.find(current => current.logicalId === node.logicalId);
+        const outcome = snapshotLaunchOutcome(snapshot.data, node.id, liveNode ? liveNode.runtime : node.runtime);
         const launchCommand = `rig launch ${rigId} ${node.logicalId} --snapshot-id ${snapshot.id}`;
         const relaunch = outcome.kind === "resume"
           ? `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
@@ -836,7 +836,10 @@ export class RestoreOrchestrator {
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
     warnings?: string[],
   ): Promise<RestoreNodeResult> {
-    const node = entry.node;
+    // NodeLauncher resolves the live logical target; saved runtime metadata must
+    // be checked against that same launch runtime, including an explicit null.
+    const liveNode = this.rigRepo.getRig(rigId)?.nodes.find(node => node.logicalId === entry.node.logicalId);
+    const node = liveNode ? { ...entry.node, runtime: liveNode.runtime } : entry.node;
     const nodeId = node.id;
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -1018,7 +1021,7 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
+    const restored = await this.postLaunchRestore({ node }, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
     return this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
   }
 

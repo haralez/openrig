@@ -359,10 +359,12 @@ describe("RestoreOrchestrator", () => {
   });
 
   it.each([
-    ["foreign resume type", "codex_id", "claude-code", false],
-    ["foreign startup runtime", "claude_id", "codex", false],
-    ["foreign startup runtime even with fresh", "claude_id", "codex", true],
-  ])("refuses %s before launch or row cleanup", async (_label, resumeType, startupRuntime, fresh) => {
+    ["foreign resume type", "codex_id", "claude-code", false, "claude-code"],
+    ["foreign startup runtime", "claude_id", "codex", false, "claude-code"],
+    ["foreign startup runtime even with fresh", "claude_id", "codex", true, "claude-code"],
+    ["live runtime changed after snapshot", "claude_id", "claude-code", false, "codex"],
+    ["live runtime changed even with fresh", "claude_id", "claude-code", true, "codex"],
+  ])("refuses %s before launch or row cleanup", async (_label, resumeType, startupRuntime, fresh, liveRuntime) => {
     const original = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
       edges: [], resumeType, resumeToken: "saved-thread",
@@ -372,6 +374,7 @@ describe("RestoreOrchestrator", () => {
       data.nodeStartupContext = { [node.id]: { runtime: startupRuntime, projectionEntries: [], resolvedStartupFiles: [], startupActions: [] } };
     });
     sessionRegistry.updateStatus(snap.data.sessions[0]!.id, "exited");
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(liveRuntime, node.id);
     const sessionsBefore = db.prepare("SELECT * FROM sessions ORDER BY id").all();
     const tmux = mockTmux();
     const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: fresh ? ["worker"] : undefined });
