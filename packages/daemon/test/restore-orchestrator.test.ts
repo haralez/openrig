@@ -31,6 +31,7 @@ import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { buildRestorePlanPreview } from "../src/domain/restore-plan-preview.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
@@ -303,6 +304,36 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.nodes[0]!.error).toContain("no running occupant when this snapshot was taken");
       expect(tmux.createSession).not.toHaveBeenCalled();
       expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["recorded history", {}, undefined, "awaiting-decision"],
+      ["explicit fresh", {}, ["worker"], "fresh"],
+      ["no token", { resumeToken: null }, undefined, "fresh"],
+      ["non-resume policy", { restorePolicy: "relaunch_fresh" }, undefined, "fresh"],
+    ] as const)("restoring continuity with %s preserves the absent-seat decision", async (_label, history, freshLogicalIds, status) => {
+      const original = absentSeat(history);
+      const node = original.data.nodes[0]!;
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("restoring-pod", original.rigId, "Dev");
+      db.prepare("UPDATE nodes SET pod_id = ? WHERE id = ?").run("restoring-pod", node.id);
+      const snap = updateSnapshotData(original, (data) => { data.nodes[0].podId = "restoring-pod"; });
+      db.prepare("INSERT INTO continuity_state (pod_id, node_id, status) VALUES (?, ?, ?)").run("restoring-pod", node.id, "restoring");
+      db.prepare("UPDATE sessions SET status = ? WHERE node_id = ?").run("exited", node.id);
+      const sessionsBefore = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+      const continuityBefore = db.prepare("SELECT * FROM continuity_state").all();
+      const tmux = mockTmux();
+      if (status === "awaiting-decision") {
+        const forecast = buildRestorePlanPreview(rigRepo.getRig(snap.rigId)!, snap, snap.data.sessions);
+        expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+      }
+      const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: freshLogicalIds ? [...freshLogicalIds] : undefined });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).toBe(status);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
+      expect(db.prepare("SELECT * FROM continuity_state").all()).toEqual(continuityBefore);
     });
 
     it("--fresh still starts it fresh", async () => {

@@ -839,7 +839,7 @@ export class RestoreOrchestrator {
     // a pod node in 'restoring' otherwise returns a silent status "fresh"
     // (classified running downstream) while the occupant truth is ambiguous,
     // bypassing A1's loud-failure semantics. Resolved/none/legacy states
-    // fall through and keep the restoring/degraded behavior unchanged.
+    // fall through to absent-history classification and the continuity check.
     const occupantResolution = resolveActiveSnapshotSession(data, nodeId);
     if (occupantResolution.kind === "ambiguous") {
       return {
@@ -848,6 +848,16 @@ export class RestoreOrchestrator {
         status: "failed",
         error: activeOccupantAmbiguityError(occupantResolution.candidateIds, occupantResolution.detail),
       };
+    }
+
+    // Classify absent-seat history before the continuity short-circuit: a
+    // restoring seat must not report fresh while its forecast awaits a decision.
+    const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
+    const priorWithToken = occupantResolution.kind === "none" && !freshRequested
+      ? absentSeatResumeHistory(data.sessions, nodeId)
+      : null;
+    if (priorWithToken) {
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name) };
     }
 
     // Consult live continuity state BEFORE clearing stale state
@@ -884,7 +894,6 @@ export class RestoreOrchestrator {
       // returned there, so only resolved/none reach here.
       const snapSession = occupantResolution.kind === "resolved" ? occupantResolution.session : null;
       const policy = snapSession?.restorePolicy ?? "resume_if_possible";
-      const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
       if (policy === "resume_if_possible" && snapSession && !snapSession.resumeToken && !freshRequested) {
         const sourceNote = resumeSourceRecorded
@@ -896,16 +905,6 @@ export class RestoreOrchestrator {
           status: "awaiting-decision",
           error: `Original session unresumable: ${sourceNote}. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
         };
-      }
-      // The same rule for a seat with no occupant at capture (it was stopped, or a reboot found
-      // nothing to resume) whose earlier occupant left a resume token: it HAD a session, so a fresh
-      // launch would silently replace that conversation. Which earlier conversation to resume is not
-      // the restore's to guess.
-      const priorWithToken = occupantResolution.kind === "none" && !freshRequested
-        ? absentSeatResumeHistory(data.sessions, nodeId)
-        : null;
-      if (priorWithToken) {
-        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name) };
       }
     }
 
