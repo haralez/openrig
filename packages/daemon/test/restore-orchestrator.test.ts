@@ -297,7 +297,7 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.result.nodes).toEqual([
-        expect.objectContaining({ logicalId: "worker", status: "awaiting-decision", error: expect.stringContaining("--fresh worker") }),
+        expect.objectContaining({ logicalId: "worker", status: "awaiting-decision", error: expect.stringContaining("rig seat launch 'worker' --fresh --reason") }),
       ]);
       expect(result.result.nodes[0]!.error).toContain("no running occupant when this snapshot was taken");
       expect(tmux.createSession).not.toHaveBeenCalled();

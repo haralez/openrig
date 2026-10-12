@@ -47,6 +47,28 @@ function fixture(opts: { status?: string; noRow?: boolean; token?: string | null
 // (launch-plan, POST /api/up plan, rig status, restore-check), while the fresh controls still launch.
 // Derived from dev-review's contract probe of 3c0f2cb3.
 describe("stopped-seat restore contract", () => {
+  it.each([false, true])("decision guidance names a per-seat fresh command when other seats run: %s", async otherSeatRunning => {
+    const h = fixture();
+    if (otherSeatRunning) {
+      const other = h.rigRepo.addNode(h.rig.id, "dev.other", { runtime: "claude-code", podId: "pod", cwd: "/tmp" });
+      const session = h.sessionRegistry.registerSession(other.id, "dev-other@stopped-review");
+      h.sessionRegistry.updateStatus(session.id, "running");
+      h.live.add("dev-other@stopped-review");
+    }
+    // Subset restore is permitted while sibling seats are already running.
+    const result = await h.post(`/api/rigs/${h.rig.id}/nodes/launch-subset`, { seats: ["dev.worker"] });
+    expect(result.status).toBe(409);
+    const body = await result.json();
+    const error = body.launched[0].error as string;
+    expect(error).toContain("rig seat launch 'dev.worker' --fresh --reason \"<why>\"");
+    expect(error).toContain("The recorded token has not been verified");
+    expect(error).not.toContain("restore the original session manually");
+    expect(error).not.toContain("Re-run with --fresh");
+    expect(h.tmux.createSession).not.toHaveBeenCalled();
+    expect(h.tmux.killSession).not.toHaveBeenCalled();
+    expect(h.live.has("dev-other@stopped-review")).toBe(otherSeatRunning);
+  });
+
   it.each(["exited", "detached", "unknown", "superseded"])("manual capture with %s history stops before native effects", async status => {
     const h = fixture({ status });
     expect(h.snapshot.data.activeOccupantsByNode?.[h.node.id]).toEqual({ kind: "absent" });
@@ -74,7 +96,7 @@ describe("stopped-seat restore contract", () => {
     const result = await applied.json();
     expect(result).toMatchObject({ nodes: [expect.objectContaining({ status: "awaiting-decision" })] });
     expect(h.tmux.createSession).not.toHaveBeenCalled();
-    expect(plan.nodes[0]).toMatchObject({ intendedAction: "awaiting-decision", reason: expect.stringContaining("--fresh dev.worker") });
+    expect(plan.nodes[0]).toMatchObject({ intendedAction: "awaiting-decision", reason: expect.stringContaining("rig seat launch 'dev.worker' --fresh --reason") });
     expect(upPlan.nodes[0].intendedAction).toBe("awaiting-decision");
     expect(JSON.stringify(status)).toContain('"intendedAction":"awaiting-decision"');
     expect(JSON.stringify(status)).toContain("restore-plan: 1 awaiting-decision");
@@ -107,7 +129,7 @@ describe("stopped-seat restore contract", () => {
     const result = await applied.json();
     expect(plan).toMatchObject({ ok: true, planOnly: true, targetNodes: [{ logicalId: "dev.worker", nodeId: h.node.id }] });
     expect(applied.status).toBe(409);
-    expect(result).toMatchObject({ ok: false, launched: [expect.objectContaining({ status: "awaiting-decision", error: expect.stringContaining("--fresh dev.worker") })] });
+    expect(result).toMatchObject({ ok: false, launched: [expect.objectContaining({ status: "awaiting-decision", error: expect.stringContaining("rig seat launch 'dev.worker' --fresh --reason") })] });
     expect(h.tmux.createSession).not.toHaveBeenCalled();
     expect(h.tmux.sendText).not.toHaveBeenCalled();
   });
@@ -120,7 +142,7 @@ describe("stopped-seat restore contract", () => {
       restore: (snapshotId, opts) => h.restoreOrchestrator.restore(snapshotId, opts),
     });
     const result = await restore(h.rig.id);
-    expect(result.attention).toEqual([expect.objectContaining({ seat: "dev.worker", need: expect.stringContaining("--fresh dev.worker") })]);
+    expect(result.attention).toEqual([expect.objectContaining({ seat: "dev.worker", need: expect.stringContaining("rig seat launch 'dev.worker' --fresh --reason") })]);
     expect(h.tmux.createSession).not.toHaveBeenCalled();
   });
 });
