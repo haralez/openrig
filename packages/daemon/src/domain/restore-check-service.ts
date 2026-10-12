@@ -256,6 +256,10 @@ export class RestoreCheckService {
     this.deps = deps;
   }
 
+  /**
+   * Compute scoped restore checks and recovery guidance from daemon, rig and
+   * seat evidence without launching occupants.
+   */
   check(opts: RestoreCheckOpts): RestoreCheckResult {
     const checks: CheckEntry[] = [];
     // rev1-r2 no-false-ready: ready-seat caveat signals that default compact
@@ -870,6 +874,10 @@ export class RestoreCheckService {
     };
   }
 
+  /**
+   * Report available seat attachment or a read-only restore-plan command.
+   * Missing attachment does not establish whether an earlier token can resume.
+   */
   private checkResumePath(node: NodeInventoryEntry, rigName: string): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
     if (node.tmuxAttachCommand) {
