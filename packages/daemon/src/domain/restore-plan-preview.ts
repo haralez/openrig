@@ -130,7 +130,7 @@ function runtimePromptFor(runtime: string | null, tokenState: ResumeTokenState):
 function intendedActionFor(
   resolution: ActiveOccupantResolution<PreviewSessionRow>,
   freshRequested: boolean,
-  absentHistory: { logicalId: string; row: PreviewSessionRow | null },
+  absentHistory: { logicalId: string; rigName: string; row: PreviewSessionRow | null },
 ): { intendedAction: RestorePlanPreviewNode["intendedAction"]; reason?: string } {
   // OPR.0.5.7.1 — a broken authoritative relation beats --fresh, exactly as
   // execution fails loudly before its fresh check: --fresh cannot override
@@ -151,7 +151,7 @@ function intendedActionFor(
   if (resolution.kind === "none" && absentHistory.row) {
     return {
       intendedAction: "awaiting-decision",
-      reason: absentSeatResumeHistoryError(absentHistory.logicalId, absentHistory.row.resumeType),
+      reason: absentSeatResumeHistoryError(absentHistory.logicalId, absentHistory.row.resumeType, absentHistory.rigName),
     };
   }
   const occupant = resolution.kind === "resolved" ? resolution.session : null;
@@ -234,7 +234,7 @@ export function buildRestorePlanPreview(
         ? resolveActiveOccupantRow(sessionRows, relationMap, node.id)
         : { kind: "none" as const };
     const { intendedAction, reason } = intendedActionFor(resolution, freshRequested,
-      { logicalId: node.logicalId, row: absentSeatResumeHistory(sessionRows, node.id) });
+      { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, node.id) });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;

@@ -60,13 +60,29 @@ describe("stopped-seat restore contract", () => {
     expect(result.status).toBe(409);
     const body = await result.json();
     const error = body.launched[0].error as string;
-    expect(error).toContain("rig seat launch 'dev.worker' --fresh --reason \"<why>\"");
+    expect(error).toContain("rig seat launch 'dev.worker@stopped-review' --fresh --reason \"<why>\"");
     expect(error).toContain("The recorded token has not been verified");
     expect(error).not.toContain("restore the original session manually");
     expect(error).not.toContain("Re-run with --fresh");
     expect(h.tmux.createSession).not.toHaveBeenCalled();
     expect(h.tmux.killSession).not.toHaveBeenCalled();
     expect(h.live.has("dev-other@stopped-review")).toBe(otherSeatRunning);
+  });
+
+  it("recommended selector stays in its rig when another rig has the same logical seat", async () => {
+    const h = fixture();
+    const other = h.rigRepo.createRig("another-rig");
+    h.rigRepo.addNode(other.id, "dev.worker", { runtime: "claude-code", cwd: "/tmp" });
+    const response = await h.post(`/api/rigs/${h.rig.id}/nodes/launch-subset`, { seats: ["dev.worker"] });
+    expect(response.status).toBe(409);
+    const result = await response.json();
+    const selector = /rig seat launch '([^']+)' --fresh/.exec(result.launched[0].error)![1]!;
+    // This verb shares the fresh-launch seat resolver without starting a provider.
+    const selected = await h.post(`/api/seat/set-model/${encodeURIComponent(selector)}`, {
+      model: "claude-fable-5", reason: "check suggested seat reference",
+    });
+    expect(selected.status).toBe(200);
+    expect(await selected.json()).toMatchObject({ ok: true, seat: { rigName: "stopped-review", logicalId: "dev.worker" } });
   });
 
   it.each(["exited", "detached", "unknown", "superseded"])("manual capture with %s history stops before native effects", async status => {
@@ -96,7 +112,7 @@ describe("stopped-seat restore contract", () => {
     const result = await applied.json();
     expect(result).toMatchObject({ nodes: [expect.objectContaining({ status: "awaiting-decision" })] });
     expect(h.tmux.createSession).not.toHaveBeenCalled();
-    expect(plan.nodes[0]).toMatchObject({ intendedAction: "awaiting-decision", reason: expect.stringContaining("rig seat launch 'dev.worker' --fresh --reason") });
+    expect(plan.nodes[0]).toMatchObject({ intendedAction: "awaiting-decision", reason: expect.stringContaining("rig seat launch 'dev.worker@stopped-review' --fresh --reason") });
     expect(upPlan.nodes[0].intendedAction).toBe("awaiting-decision");
     expect(JSON.stringify(status)).toContain('"intendedAction":"awaiting-decision"');
     expect(JSON.stringify(status)).toContain("restore-plan: 1 awaiting-decision");
@@ -129,7 +145,7 @@ describe("stopped-seat restore contract", () => {
     const result = await applied.json();
     expect(plan).toMatchObject({ ok: true, planOnly: true, targetNodes: [{ logicalId: "dev.worker", nodeId: h.node.id }] });
     expect(applied.status).toBe(409);
-    expect(result).toMatchObject({ ok: false, launched: [expect.objectContaining({ status: "awaiting-decision", error: expect.stringContaining("rig seat launch 'dev.worker' --fresh --reason") })] });
+    expect(result).toMatchObject({ ok: false, launched: [expect.objectContaining({ status: "awaiting-decision", error: expect.stringContaining("rig seat launch 'dev.worker@stopped-review' --fresh --reason") })] });
     expect(h.tmux.createSession).not.toHaveBeenCalled();
     expect(h.tmux.sendText).not.toHaveBeenCalled();
   });
@@ -142,7 +158,7 @@ describe("stopped-seat restore contract", () => {
       restore: (snapshotId, opts) => h.restoreOrchestrator.restore(snapshotId, opts),
     });
     const result = await restore(h.rig.id);
-    expect(result.attention).toEqual([expect.objectContaining({ seat: "dev.worker", need: expect.stringContaining("rig seat launch 'dev.worker' --fresh --reason") })]);
+    expect(result.attention).toEqual([expect.objectContaining({ seat: "dev.worker", need: expect.stringContaining("rig seat launch 'dev.worker@stopped-review' --fresh --reason") })]);
     expect(h.tmux.createSession).not.toHaveBeenCalled();
   });
 });

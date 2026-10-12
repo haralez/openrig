@@ -901,7 +901,7 @@ export class RestoreOrchestrator {
         ? absentSeatResumeHistory(data.sessions, nodeId)
         : null;
       if (priorWithToken) {
-        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType) };
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name) };
       }
     }
 
