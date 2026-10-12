@@ -819,6 +819,10 @@ export class RestoreOrchestrator {
     }));
   }
 
+  /**
+   * Restore one planned seat, checking continuity before launching its occupant.
+   * Preserve prior state so a failed launch or resume can be compensated.
+   */
   private async restoreNodeWithCompensation(
     entry: PlanEntry,
     rigId: string,

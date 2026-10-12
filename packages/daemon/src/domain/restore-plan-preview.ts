@@ -211,6 +211,10 @@ export function collectPreviewSessionRows(
   }));
 }
 
+/**
+ * Forecast per-seat restore actions from current inventory and saved occupancy.
+ * Report token state and guidance without launching or changing any sessions.
+ */
 export function buildRestorePlanPreview(
   rig: RigWithRelations,
   snapshot: Snapshot | null,
