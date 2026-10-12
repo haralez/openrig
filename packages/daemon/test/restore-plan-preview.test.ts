@@ -34,6 +34,26 @@ const FRESH = "2026-07-02 11:59:00"; // 1 min ago (< 1h threshold)
 const OLD = "2026-07-02 10:00:00";   // 2h ago (> 1h threshold)
 
 describe("FR-6 restore-plan token state", () => {
+  it.each([
+    ["claude-code", "claude_id", false, "resume-original"],
+    ["claude-code", "claude_name", false, "resume-original"],
+    ["codex", "codex_id", false, "resume-original"],
+    ["codex", "codex_last", false, "resume-original"],
+    ["pi", "pi_session_file", false, "resume-original"],
+    ["omp", "omp_session_file", false, "resume-original"],
+    ["stub", "stub_id", false, "resume-original"],
+    ["stub", "stub_session", false, "resume-original"],
+    ["claude-code", "codex_id", false, "awaiting-decision"],
+    ["codex", "claude_id", false, "awaiting-decision"],
+    ["pi", "omp_session_file", false, "awaiting-decision"],
+    ["omp", "pi_session_file", false, "awaiting-decision"],
+    ["claude-code", "codex_id", true, "fresh-primed"],
+  ])("forecasts %s with %s and fresh=%s as %s", (runtime, resumeType, fresh, action) => {
+    const rig = rigWith([{ id: "n1", logicalId: "a", runtime }]);
+    const forecast = buildRestorePlanPreview(rig, null, [row("n1", { resumeType })], fresh ? ["a"] : undefined);
+    expect(forecast.nodes[0]!.intendedAction).toBe(action);
+  });
+
   it("presents a never-occupied current seat as new, without a history warning", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]);
     const result = buildRestorePlanPreview(rig, null, []).nodes[0]!;

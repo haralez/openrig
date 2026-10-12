@@ -1,3 +1,4 @@
+import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -117,6 +118,10 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string):
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
   const session = occupant.kind === "resolved" ? occupant.session : null;
+  const node = data.nodes.find((node) => node.id === nodeId);
+  const runtimeError = restoreRuntimeCompatibilityError(node?.runtime ?? null,
+    data.nodeStartupContext?.[nodeId]?.runtime, session, false);
+  if (runtimeError) return { kind: "decision", why: runtimeError };
   if (!session) {
     // The restore's own rule for a seat stopped at capture whose earlier occupant left a token.
     const prior = occupant.kind === "none" ? absentSeatResumeHistory(data.sessions, nodeId) : null;
@@ -850,9 +855,16 @@ export class RestoreOrchestrator {
       };
     }
 
+    const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
+    const runtimeError = restoreRuntimeCompatibilityError(node.runtime,
+      data.nodeStartupContext?.[nodeId]?.runtime,
+      occupantResolution.kind === "resolved" ? occupantResolution.session : null, freshRequested);
+    if (runtimeError) {
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: runtimeError };
+    }
+
     // Classify absent-seat history before the continuity short-circuit: a
     // restoring seat must not report fresh while its forecast awaits a decision.
-    const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
     const priorWithToken = occupantResolution.kind === "none" && !freshRequested
       ? absentSeatResumeHistory(data.sessions, nodeId)
       : null;

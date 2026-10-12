@@ -1,3 +1,4 @@
+import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
 // OPR.0.3.4.4 — read-only restore plan preview.
 //
 // `rig up --existing <rig> --plan` advertised "preview without executing" but
@@ -237,8 +238,14 @@ export function buildRestorePlanPreview(
       : sessionRows.some((row) => row.nodeId === node.id)
         ? resolveActiveOccupantRow(sessionRows, relationMap, node.id)
         : { kind: "none" as const };
-    const { intendedAction, reason } = intendedActionFor(resolution, freshRequested,
-      { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, node.id) });
+    const runtimeError = resolution.kind !== "ambiguous"
+      ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[node.id]?.runtime,
+        resolution.kind === "resolved" ? resolution.session : null, freshRequested)
+      : null;
+    const { intendedAction, reason } = runtimeError
+      ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
+      : intendedActionFor(resolution, freshRequested,
+        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, node.id) });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;

@@ -358,6 +358,34 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
+  it.each([
+    ["foreign resume type", "codex_id", "claude-code", false],
+    ["foreign startup runtime", "claude_id", "codex", false],
+    ["foreign startup runtime even with fresh", "claude_id", "codex", true],
+  ])("refuses %s before launch or row cleanup", async (_label, resumeType, startupRuntime, fresh) => {
+    const original = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType, resumeToken: "saved-thread",
+    });
+    const node = original.data.nodes[0]!;
+    const snap = updateSnapshotData(original, (data) => {
+      data.nodeStartupContext = { [node.id]: { runtime: startupRuntime, projectionEntries: [], resolvedStartupFiles: [], startupActions: [] } };
+    });
+    sessionRegistry.updateStatus(snap.data.sessions[0]!.id, "exited");
+    const sessionsBefore = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+    const tmux = mockTmux();
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: fresh ? ["worker"] : undefined });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(result.result.nodes[0]!.status).toBe("awaiting-decision");
+    const forecast = buildRestorePlanPreview(rigRepo.getRig(snap.rigId)!, snap, snap.data.sessions, fresh ? ["worker"] : undefined);
+    expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+    expect(forecast.nodes[0]!.reason).toBe(result.result.nodes[0]!.error);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
+  });
+
   it("constructor throws on mismatched db handles", () => {
     const otherDb = setupDb();
     const otherRepo = new RigRepository(otherDb);
@@ -1921,9 +1949,12 @@ describe("RestoreOrchestrator", () => {
           expect(startupWrites).toHaveBeenCalledExactlyOnceWith(joinSessionId, "attention_required");
         }
       } else if (mode === "requested-codex-type") {
-        expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
-        expect(db.prepare("SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(latest.id))
-          .toEqual({ resume_type: "claude_id", resume_token: token, resume_provenance: "scrape" });
+        expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "awaiting-decision", startup: "pending" });
+        expect(latest.id).toBe(old.id);
+        expect(tmux.createSession).not.toHaveBeenCalled();
+        expect(tmux.sendText).not.toHaveBeenCalled();
+        expect(db.prepare("SELECT resume_type, resume_token FROM sessions WHERE id = ?").get(latest.id))
+          .toEqual({ resume_type: "codex_id", resume_token: token });
         expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
       } else if (mode === "exact" || mode === "requested-legacy-type" || mode.endsWith("-equal")) {
         expect({ status: outcome.status, token: latest.resumeToken }).toEqual({ status: "resumed", token });
@@ -1949,7 +1980,7 @@ describe("RestoreOrchestrator", () => {
       } else {
         expect(tmux.killSession).not.toHaveBeenCalled();
       }
-      if (mode !== "missing-token") {
+      if (mode !== "missing-token" && mode !== "requested-codex-type") {
         expect(tmux.createSession).toHaveBeenCalledTimes(1);
         if (!lostOwnership && mode !== "error") expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
         expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
