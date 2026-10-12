@@ -275,6 +275,7 @@ describe("RestoreOrchestrator", () => {
   // Backlog finding 5: a seat with no occupant at capture (stopped, or nothing running at a reboot)
   // whose earlier occupant left a resume token is not silently fresh-primed.
   describe("a seat with no occupant at capture", () => {
+    /** Capture an absent seat while retaining configurable resume-token history and policy. */
     function absentSeat(opts: { resumeToken?: string | null; restorePolicy?: string } = {}) {
       const snap = seedRigAndSnapshot({
         nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],

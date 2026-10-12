@@ -6,6 +6,7 @@ import { createDefaultRestoreRig } from "../src/domain/crash-cart-conductor.js";
 const databases: ReturnType<typeof createFullTestDb>[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
+/** Build isolated saved-seat history and terminal state for preserved-shell forecast checks. */
 function fixture(opts: { status?: string; noRow?: boolean; token?: string | null; policy?: string; kind?: string } = {}) {
   const db = createFullTestDb(); databases.push(db);
   const live = new Set<string>();
