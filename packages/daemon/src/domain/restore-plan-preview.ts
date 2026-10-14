@@ -233,18 +233,19 @@ export function buildRestorePlanPreview(
     : deriveRehydrateSessionIdByNode(sessionRows, rig.nodes.map((n) => n.id), recorded);
   const nodes: RestorePlanPreviewNode[] = rig.nodes.map((node) => {
     const freshRequested = freshLogicalIds?.includes(node.logicalId) ?? false;
+    const savedNodeId = snapshot?.data.nodes?.find(saved => saved.logicalId === node.logicalId)?.id ?? node.id;
     const resolution = snapshot
-      ? resolveActiveSnapshotSession(snapshot.data, node.id)
+      ? resolveActiveSnapshotSession(snapshot.data, savedNodeId)
       : sessionRows.some((row) => row.nodeId === node.id)
         ? resolveActiveOccupantRow(sessionRows, relationMap, node.id)
         : { kind: "none" as const };
     const runtimeError = resolution.kind !== "ambiguous"
-      ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[node.id]?.runtime)
+      ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[savedNodeId]?.runtime)
       : null;
     const { intendedAction, reason } = runtimeError
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
       : intendedActionFor(resolution, freshRequested,
-        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, node.id) });
+        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId) });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;

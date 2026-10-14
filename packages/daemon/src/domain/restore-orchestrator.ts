@@ -836,10 +836,9 @@ export class RestoreOrchestrator {
     opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
     warnings?: string[],
   ): Promise<RestoreNodeResult> {
-    // NodeLauncher resolves the live logical target; saved runtime metadata must
-    // be checked against that same launch runtime, including an explicit null.
-    const liveNode = this.rigRepo.getRig(rigId)?.nodes.find(node => node.logicalId === entry.node.logicalId);
-    const node = liveNode ? { ...entry.node, runtime: liveNode.runtime } : entry.node;
+    // Compare against the live logical target without changing saved post-launch inputs.
+    const node = entry.node;
+    const liveNode = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId);
     const nodeId = node.id;
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
@@ -859,7 +858,7 @@ export class RestoreOrchestrator {
     }
 
     const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
-    const runtimeError = restoreRuntimeCompatibilityError(node.runtime,
+    const runtimeError = restoreRuntimeCompatibilityError(liveNode ? liveNode.runtime : node.runtime,
       data.nodeStartupContext?.[nodeId]?.runtime);
     if (runtimeError) {
       return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: runtimeError };
@@ -1020,7 +1019,7 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    const restored = await this.postLaunchRestore({ node }, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
+    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState);
     return this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
   }
 

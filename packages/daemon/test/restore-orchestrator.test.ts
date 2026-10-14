@@ -389,6 +389,69 @@ describe("RestoreOrchestrator", () => {
     expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(sessionsBefore);
   });
 
+  it.each([
+    [null, "claude-code", "claude_id", "resumed", "fully_restored"],
+    ["codex", "codex", "codex_id", "attention_required", "partially_restored"],
+  ] as const)("keeps saved-node postlaunch behavior with live=%s and context=%s", async (live, context, resumeType, status, rigResult) => {
+    const rig = rigRepo.createRig("saved-runtime");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("saved-runtime-pod", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.owner", { runtime: "claude-code", podId: "saved-runtime-pod" });
+    const session = sessionRegistry.registerSession(node.id, "dev-owner@saved-runtime");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, resumeType, "00000000-0000-4000-8000-000000000086");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+      .run(node.id, "[]", "[]", "[]", context);
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(live, node.id);
+    const tmux = mockTmux();
+    tmux.getPaneCommand = vi.fn(async () => "bash");
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    const processes = context === "claude-code" ? managedClaudeRows("00000000-0000-4000-8000-000000000086") : [
+      { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, executableName: "bash", command: "-bash", startedAt },
+      { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, executableName: "sh", command: "/bin/sh /tmp/openrig-tmux-send.txt", startedAt },
+      { pid: 1236, ppid: 1235, pgid: 1235, tpgid: 1235, executableName: "codex", command: "/opt/native/codex resume 00000000-0000-4000-8000-000000000086", startedAt },
+    ];
+    /** Build a ready adapter with a valid native resume identity for the saved-runtime fixture. */
+    const adapterFor = (runtime: "claude-code" | "codex"): RuntimeAdapter => ({
+      runtime, listInstalled: vi.fn(async () => []), project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })), checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "00000000-0000-4000-8000-000000000086", resumeType })),
+    });
+    const claude = adapterFor("claude-code"); const codex = adapterFor("codex");
+    const result = await createOrchestrator({ tmux, listProcesses: async () => processes })
+      .restore(snap.id, { adapters: { "claude-code": claude, codex } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect({ node: result.result.nodes[0], calls: [vi.mocked(claude.launchHarness).mock.calls.length, vi.mocked(codex.launchHarness).mock.calls.length] }).toMatchObject({ node: { status } });
+    expect(result.result.rigResult).toBe(rigResult);
+    expect(tmux.createSession).toHaveBeenCalledTimes(1);
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect((context === "codex" ? codex : claude).launchHarness).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([[false, false], [true, false], [false, true], [true, true]])("preview agrees after removing/regrowing a seat, fresh=%s legacy=%s", async (fresh, legacy) => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [], resumeType: "claude_id", resumeToken: "saved-thread" });
+    const saved = original.data.nodes[0]!;
+    const snap = updateSnapshotData(original, data => {
+      data.nodeStartupContext = { [saved.id]: { runtime: "claude-code", projectionEntries: [], resolvedStartupFiles: [], startupActions: [] } };
+      if (legacy) { delete data.activeOccupantsByNode; delete data.activeSessionIdByNode; }
+    });
+    rigRepo.deleteNode(saved.id);
+    const current = rigRepo.addNode(snap.rigId, "worker", { role: "worker", runtime: "codex" });
+    expect(current.id).not.toBe(saved.id);
+    const forecast = buildRestorePlanPreview(rigRepo.getRig(snap.rigId)!, snap, snap.data.sessions, fresh ? ["worker"] : undefined);
+    const tmux = mockTmux();
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: fresh ? ["worker"] : undefined });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]!.status).toBe("awaiting-decision");
+    expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
+    expect(forecast.nodes[0]!.reason).toBe(result.result.nodes[0]!.error);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
   it("constructor throws on mismatched db handles", () => {
     const otherDb = setupDb();
     const otherRepo = new RigRepository(otherDb);
