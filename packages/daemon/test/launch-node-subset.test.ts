@@ -89,6 +89,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     return { rigId: rig.id, nodeIds: [n1.id, n2.id] };
   }
 
+  /** Capture the supplied private roster and startup contexts for subset-launch checks. */
   function seedSnapshot(rigId: string, nodeIds: string[], nodeStartupContext: Record<string, unknown> = {}) {
     const sessions = nodeIds.map((nid, i) => ({
       nodeId: nid,
