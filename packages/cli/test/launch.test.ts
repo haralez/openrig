@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** Record client calls and return fixture responses matched by route fragment. */
 function mockClient(responses: Record<string, { status: number; data: unknown }>) {
   return {
     post: vi.fn(async (url: string, body: unknown) => {
@@ -18,6 +19,7 @@ function mockClient(responses: Record<string, { status: number; data: unknown }>
   };
 }
 
+/** Build a running-daemon fixture and expose its request spies for command assertions. */
 function makeDeps(clientResponses: Record<string, { status: number; data: unknown }>) {
   const client = mockClient(clientResponses);
   return {
