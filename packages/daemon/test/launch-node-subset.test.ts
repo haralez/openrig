@@ -117,6 +117,21 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     return snap.id;
   }
 
+  it.each([
+    ["codex", "claude-code"],
+    ["claude-code", "codex"],
+  ])("saved startup %s stops live %s before subset launch", async (saved, live) => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const snapshotId = seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext(saved) });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(live, nodeIds[0]);
+    const before = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+    const result = await orchestrator.launchNodeSubset(rigId, ["dev.driver"], { snapshotId });
+    expect(result.ok).toBe(true); // The subset envelope reports individual launch outcomes.
+    expect(result.launched?.[0]).toMatchObject({ status: "awaiting-decision", error: "No session was started for this seat. Restore a snapshot whose saved startup runtime matches the seat's current runtime." });
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
+  });
+
   it("returns rig_not_found for unknown rig", async () => {
     const result = await orchestrator.launchNodeSubset("nonexistent", ["dev.driver"]);
     expect(result.ok).toBe(false);

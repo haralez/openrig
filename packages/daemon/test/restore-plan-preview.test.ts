@@ -43,15 +43,36 @@ describe("FR-6 restore-plan token state", () => {
     ["omp", "omp_session_file", false, "resume-original"],
     ["stub", "stub_id", false, "resume-original"],
     ["stub", "stub_session", false, "resume-original"],
-    ["claude-code", "codex_id", false, "awaiting-decision"],
-    ["codex", "claude_id", false, "awaiting-decision"],
-    ["pi", "omp_session_file", false, "awaiting-decision"],
-    ["omp", "pi_session_file", false, "awaiting-decision"],
+    ["claude-code", "codex_id", false, "resume-original"],
+    ["codex", "claude_id", false, "resume-original"],
+    ["pi", "omp_session_file", false, "resume-original"],
+    ["omp", "pi_session_file", false, "resume-original"],
     ["claude-code", "codex_id", true, "fresh-primed"],
   ])("forecasts %s with %s and fresh=%s as %s", (runtime, resumeType, fresh, action) => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime }]);
     const forecast = buildRestorePlanPreview(rig, null, [row("n1", { resumeType })], fresh ? ["a"] : undefined);
     expect(forecast.nodes[0]!.intendedAction).toBe(action);
+  });
+
+  it.each([false, true])("saved startup mismatch refuses even with fresh=%s", (fresh) => {
+    const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "claude-code" }]);
+    const rows = [row("n1", { resumeType: "codex_id" })];
+    const snapshot = { id: "snap", kind: "manual", createdAt: "now", data: {
+      sessions: rows, activeSessionIdByNode: { n1: "s-n1" },
+      nodeStartupContext: { n1: { runtime: "codex" } },
+    } } as unknown as Snapshot;
+    const result = buildRestorePlanPreview(rig, snapshot, rows, fresh ? ["a"] : undefined).nodes[0]!;
+    expect(result.intendedAction).toBe("awaiting-decision");
+    expect(result.reason).toBe("No session was started for this seat. Restore a snapshot whose saved startup runtime matches the seat's current runtime.");
+  });
+
+  it.each([undefined, null, { runtime: null }, { runtime: "claude-code" }])("does not refuse legacy token with missing, unknown, or matching startup context: %j", (context) => {
+    const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "claude-code" }]);
+    const rows = [row("n1", { resumeType: "codex_id" })];
+    const snapshot = { id: "snap", kind: "manual", createdAt: "now", data: {
+      sessions: rows, activeSessionIdByNode: { n1: "s-n1" }, nodeStartupContext: { n1: context },
+    } } as unknown as Snapshot;
+    expect(buildRestorePlanPreview(rig, snapshot, rows).nodes[0]!.intendedAction).toBe("resume-original");
   });
 
   it("presents a never-occupied current seat as new, without a history warning", () => {

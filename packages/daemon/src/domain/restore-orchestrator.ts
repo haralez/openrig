@@ -119,7 +119,7 @@ function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: stri
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
   const session = occupant.kind === "resolved" ? occupant.session : null;
   const runtimeError = restoreRuntimeCompatibilityError(runtime,
-    data.nodeStartupContext?.[nodeId]?.runtime, session, false);
+    data.nodeStartupContext?.[nodeId]?.runtime);
   if (runtimeError) return { kind: "decision", why: runtimeError };
   if (!session) {
     // The restore's own rule for a seat stopped at capture whose earlier occupant left a token.
@@ -860,8 +860,7 @@ export class RestoreOrchestrator {
 
     const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
     const runtimeError = restoreRuntimeCompatibilityError(node.runtime,
-      data.nodeStartupContext?.[nodeId]?.runtime,
-      occupantResolution.kind === "resolved" ? occupantResolution.session : null, freshRequested);
+      data.nodeStartupContext?.[nodeId]?.runtime);
     if (runtimeError) {
       return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: runtimeError };
     }

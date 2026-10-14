@@ -239,8 +239,7 @@ export function buildRestorePlanPreview(
         ? resolveActiveOccupantRow(sessionRows, relationMap, node.id)
         : { kind: "none" as const };
     const runtimeError = resolution.kind !== "ambiguous"
-      ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[node.id]?.runtime,
-        resolution.kind === "resolved" ? resolution.session : null, freshRequested)
+      ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[node.id]?.runtime)
       : null;
     const { intendedAction, reason } = runtimeError
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
