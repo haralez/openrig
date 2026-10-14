@@ -75,6 +75,36 @@ describe("FR-6 restore-plan token state", () => {
     expect(buildRestorePlanPreview(rig, snapshot, rows).nodes[0]!.intendedAction).toBe("resume-original");
   });
 
+  it.each([
+    [false, false, "tok"], [true, false, "tok"],
+    [false, true, "tok"], [true, true, "tok"],
+    [false, false, null], [true, false, null],
+    [false, true, null], [true, true, null],
+  ])("regrown snapshot history stays visible and mismatch is not fresh-able: fresh=%s legacy=%s token=%s", (fresh, legacy, token) => {
+    const rig = rigWith([{ id: "new-node", logicalId: "a", runtime: "codex" }]);
+    const rows = [row("old-node", { resumeToken: token })];
+    const data = {
+      nodes: [{ id: "old-node", logicalId: "a", runtime: "claude-code" }], sessions: rows,
+      nodeStartupContext: { "old-node": { runtime: "claude-code" } },
+      ...(legacy ? {} : { activeSessionIdByNode: { "old-node": "s-old-node" } }),
+    };
+    const snapshot = { id: "snap", kind: "manual", createdAt: "now", data } as unknown as Snapshot;
+    expect(buildRestorePlanPreview(rig, snapshot, rows, fresh ? ["a"] : undefined).nodes[0]).toMatchObject({
+      hasHistory: true, intendedAction: "awaiting-decision", freshRequired: false,
+    });
+  });
+
+  it.each([false, true])("same-ID mismatch does not suggest fresh for a missing token, fresh=%s", (fresh) => {
+    const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]);
+    const rows = [row("n1", { resumeToken: null })];
+    const snapshot = { id: "snap", kind: "manual", createdAt: "now", data: {
+      sessions: rows, nodeStartupContext: { n1: { runtime: "claude-code" } },
+    } } as unknown as Snapshot;
+    expect(buildRestorePlanPreview(rig, snapshot, rows, fresh ? ["a"] : undefined).nodes[0]).toMatchObject({
+      hasHistory: true, tokenState: "missing", intendedAction: "awaiting-decision", freshRequired: false,
+    });
+  });
+
   it("presents a never-occupied current seat as new, without a history warning", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]);
     const result = buildRestorePlanPreview(rig, null, []).nodes[0]!;

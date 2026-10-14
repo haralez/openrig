@@ -254,16 +254,16 @@ export function buildRestorePlanPreview(
     return {
       logicalId: node.logicalId,
       occupantSessionId: occupant?.id ?? null,
-      hasHistory: sessionRows.some((row) => row.nodeId === node.id),
+      hasHistory: sessionRows.some((row) => row.nodeId === savedNodeId),
       intendedAction,
       ...(reason ? { reason } : {}),
       tokenState,
       ...(provenance ? { provenance } : {}),
       ...(lastVerified ? { lastVerified } : {}),
       // no resumable token → restore needs an explicit --fresh (never
-      // silent); a broken relation is NOT fresh-able — A1 ambiguity is
-      // unrecoverable-until-resolved, so --fresh cannot be the remedy.
-      freshRequired: resolution.kind === "ambiguous" ? false : tokenState === "missing",
+      // silent); runtime mismatches and broken relations cannot be resolved
+      // by a fresh request, so --fresh must not be suggested as their remedy.
+      freshRequired: runtimeError || resolution.kind === "ambiguous" ? false : tokenState === "missing",
       ...(runtimePrompt ? { runtimePrompt } : {}),
     };
   });
