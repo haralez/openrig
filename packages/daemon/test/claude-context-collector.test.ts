@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, mkdtempSync, copyFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, mkdtempSync, copyFileSync, chmodSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { replaceFile } from "../src/adapters/replace-file.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const VALID_STATUS_LINE = JSON.stringify({
@@ -616,5 +617,52 @@ describe("provisioned collector command shell paths", () => {
     const cwd = join(root, "quoted project");
     const original = provision(cwd, join(root, "old state")).statusLine.command + suffix;
     expect(provision(cwd, join(root, "new state"), original).statusLine.command).toBe(original);
+  });
+});
+
+describe("re-seating the collector from a read-only asset", () => {
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "openrig-collector-readonly-")); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+
+  function adapterFor(asset: string, copyFile: (src: string, dest: string) => void) {
+    return new ClaudeCodeAdapter({
+      tmux: {} as TmuxAdapter, stateDir: join(root, "state"), collectorAssetPath: asset,
+      fsOps: {
+        readFile: (p) => readFileSync(p, "utf8"), writeFile: (p, text) => writeFileSync(p, text),
+        exists: existsSync, mkdirp: (p) => { mkdirSync(p, { recursive: true }); }, copyFile,
+      },
+    });
+  }
+
+  it("plain copyFileSync cannot overwrite the read-only copy it made last time", () => {
+    if (process.getuid?.() === 0) return; // root ignores file modes
+    const asset = join(root, "asset.cjs");
+    writeFileSync(asset, "// v1\n");
+    chmodSync(asset, 0o444);
+    const cwd = join(root, "seat");
+    const adapter = adapterFor(asset, copyFileSync);
+    adapter.ensureContextCollector({ cwd });
+    expect(() => adapter.ensureContextCollector({ cwd })).toThrow(/EACCES/);
+  });
+
+  it("replaceFile re-seats it on every poll, including after the asset changes", () => {
+    const asset = join(root, "asset.cjs");
+    writeFileSync(asset, "// v1\n");
+    chmodSync(asset, 0o444);
+    const cwd = join(root, "seat");
+    const dest = join(cwd, ".openrig", "context-collector.cjs");
+    const adapter = adapterFor(asset, replaceFile);
+    adapter.ensureContextCollector({ cwd });
+    adapter.ensureContextCollector({ cwd });
+    expect(readFileSync(dest, "utf8")).toBe("// v1\n");
+
+    chmodSync(asset, 0o644);
+    writeFileSync(asset, "// v2\n");
+    chmodSync(asset, 0o444);
+    adapter.ensureContextCollector({ cwd });
+    expect(readFileSync(dest, "utf8")).toBe("// v2\n");
+    expect(statSync(dest).mode & 0o222).toBe(0);
+    expect(readdirSync(join(cwd, ".openrig")).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });
