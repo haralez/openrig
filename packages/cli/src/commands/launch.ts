@@ -231,7 +231,8 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
           }
           body.plan = true;
         }
-        const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body);
+        const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body,
+          opts.plan ? undefined : { timeoutMs: 120_000 });
         const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data) && answerShowsAction(res.status >= 200 && res.status < 300, res.data));
         if (notAPlan) {
           console.error(notAPlanMessage());

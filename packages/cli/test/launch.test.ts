@@ -75,6 +75,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver", "dev.guard"], holdReason: "codex auth expired" },
+      { timeoutMs: 120_000 },
     );
     expect(logs.some((l) => l.includes("dev.driver"))).toBe(true);
     expect(logs.some((l) => l.includes("dev.guard"))).toBe(true);
@@ -138,6 +139,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver"], holdReason: "operator hold", plan: true },
+      undefined,
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
     expect(logs.join("\n")).toContain("dev.guard: operator hold");
@@ -247,6 +249,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver"], plan: true, nonTargetMode: "unchanged" },
+      undefined,
     );
     expect(logs.join("\n")).toContain("Plan only; no changes made.");
     expect(logs.join("\n")).toContain("Non-target effect: unchanged");
@@ -284,6 +287,7 @@ describe("rig launch --seats", () => {
     expect(deps._client.post).toHaveBeenCalledWith(
       "/api/rigs/rig-1/nodes/launch-subset",
       { seats: ["dev.driver", "dev.guard"], plan: true, holdReason: "hold other seats" },
+      undefined,
     );
     expect(process.exitCode).toBeUndefined();
   });
