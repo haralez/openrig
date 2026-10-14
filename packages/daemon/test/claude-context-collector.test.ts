@@ -6,6 +6,8 @@ import { execSync, spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
+import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 const VALID_STATUS_LINE = JSON.stringify({
@@ -648,6 +650,52 @@ describe("re-seating the collector from a read-only asset", () => {
     const adapter = adapterFor(asset, copyFileSync);
     adapter.ensureContextCollector({ cwd });
     expect(() => adapter.ensureContextCollector({ cwd })).toThrow(/EACCES/);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("updates a writable collector in a readonly directory", () => {
+    const asset = join(root, "asset.cjs");
+    writeFileSync(asset, "// v1\n"); chmodSync(asset, 0o644);
+    const cwd = join(root, "seat");
+    const parent = join(cwd, ".openrig");
+    const adapter = adapterFor(asset, replaceFile);
+    adapter.ensureContextCollector({ cwd });
+    chmodSync(parent, 0o555);
+    try {
+      writeFileSync(asset, "// v2\n");
+      adapter.ensureContextCollector({ cwd });
+      adapter.ensureContextCollector({ cwd });
+      expect(readFileSync(join(parent, "context-collector.cjs"), "utf8")).toBe("// v2\n");
+      expect(statSync(parent).mode & 0o777).toBe(0o555);
+      expect(readdirSync(parent).filter(f => f.includes(".tmp"))).toEqual([]);
+    } finally { chmodSync(parent, 0o755); }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("updates a writable activity relay in a readonly directory", async () => {
+    const asset = join(root, "relay.cjs");
+    writeFileSync(asset, "// relay v1\n"); chmodSync(asset, 0o755);
+    const stateDir = join(root, "relay-state");
+    const cwd = join(root, "relay-seat");
+    const adapter = new ClaudeCodeAdapter({
+      tmux: {} as TmuxAdapter, stateDir, activityRelayPath: asset,
+      claudeHooksManifestPath: join(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"),
+      fsOps: { readFile: p => readFileSync(p, "utf8"), writeFile: (p, text) => writeFileSync(p, text),
+        exists: existsSync, mkdirp: p => { mkdirSync(p, { recursive: true }); }, copyFile: replaceFile,
+        statMode: p => statSync(p).mode, chmod: chmodSync },
+    });
+    const plan = { runtime: "claude-code", cwd, entries: [{ category: "runtime_resource", resourceType: "claude_activity_hooks",
+      effectiveId: "activity", classification: "safe_projection", sourceSpec: "shared", sourcePath: asset,
+      resourcePath: "activity", absolutePath: asset }], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] } as ProjectionPlan;
+    expect((await adapter.project(plan, { cwd } as NodeBinding)).projected).toContain("activity");
+    const parent = join(stateDir, "state/claude-activity-hooks");
+    chmodSync(parent, 0o555);
+    try {
+      writeFileSync(asset, "// relay v2\n");
+      expect((await adapter.project(plan, { cwd } as NodeBinding)).projected).toContain("activity");
+      expect(readFileSync(join(parent, "activity-relay.cjs"), "utf8")).toBe("// relay v2\n");
+      expect(statSync(join(parent, "activity-relay.cjs")).mode & 0o777).toBe(0o755);
+      expect(statSync(parent).mode & 0o777).toBe(0o555);
+      expect(readdirSync(parent)).toEqual(["activity-relay.cjs"]);
+    } finally { chmodSync(parent, 0o755); }
   });
 
   it("replaceFile re-seats it on every poll, including after the asset changes", () => {

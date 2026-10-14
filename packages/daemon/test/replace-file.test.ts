@@ -47,8 +47,22 @@ describe("replaceFile staging ownership", () => {
     fs.writeFileSync(collision, "other actor bytes");
     const error = Object.assign(new Error("staging creation failed"), { code: "EACCES" });
     vi.spyOn(fs, "mkdtempSync").mockImplementation(() => { throw error; });
-    expect(() => replaceFile(src, dest)).toThrow(error);
+    const cleanup = vi.spyOn(fs, "rmSync");
+    replaceFile(src, dest);
+    expect(cleanup).not.toHaveBeenCalled();
     expect(fs.readFileSync(collision, "utf8")).toBe("other actor bytes");
+    expect(fs.readFileSync(dest, "utf8")).toBe("new complete bytes");
+  });
+
+  it("reports the in-place copy error when staging creation and fallback both fail", () => {
+    const { src, dest } = files();
+    const stagingError = new Error("staging creation failed");
+    const copyError = new Error("in-place copy failed");
+    vi.spyOn(fs, "mkdtempSync").mockImplementation(() => { throw stagingError; });
+    vi.spyOn(fs, "copyFileSync").mockImplementation(() => { throw copyError; });
+    const cleanup = vi.spyOn(fs, "rmSync");
+    expect(() => replaceFile(src, dest)).toThrow(copyError);
+    expect(cleanup).not.toHaveBeenCalled();
     expect(fs.readFileSync(dest, "utf8")).toBe("old complete bytes");
   });
 
