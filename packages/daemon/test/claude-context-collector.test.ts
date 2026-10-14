@@ -193,6 +193,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  /** Provide filesystem operations for collector fixtures. */
   function mockFsOps() {
     return {
       readFile: (p: string) => written[p] ?? (() => { throw new Error("ENOENT"); })(),
@@ -204,6 +205,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     };
   }
 
+  /** Supply a terminal adapter without starting a real session. */
   function mockTmux(): TmuxAdapter {
     return {
       sendText: vi.fn(async () => ({ ok: true as const })),
@@ -576,6 +578,7 @@ describe("provisioned collector command shell paths", () => {
   let root: string;
   beforeEach(() => { root = mkdtempSync(join(tmpdir(), "openrig-collector-shell-")); });
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+  /** Provision a collector in the supplied private shell-path fixture. */
   function provision(cwd: string, stateDir: string, command?: string) {
     const settings = join(cwd, ".claude", "settings.local.json");
     mkdirSync(join(cwd, ".claude"), { recursive: true });
