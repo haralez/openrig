@@ -1,18 +1,22 @@
 import fs from "node:fs";
+import path from "node:path";
 
 /**
- * Copy `src` over `dest` by renaming a sibling into place instead of opening `dest` for writing.
- * `copyFileSync` carries the source mode over, so a read-only source (a package-manager store such as
- * Nix's) leaves a read-only destination that a later plain copy cannot overwrite (EACCES). Renaming
- * over it needs only a writable directory, and a reader never sees a half-written file.
+ * Replace a file through exclusively created sibling staging and an atomic rename.
+ * Preserve the source mode so read-only packaged assets can be provisioned repeatedly.
+ * Never follow an existing temporary slot, and clean only this invocation's staging.
  */
 export function replaceFile(src: string, dest: string): void {
-  const tmp = `${dest}.${process.pid}.tmp`;
+  const staging = fs.mkdtempSync(`${dest}.tmp-`);
+  const tmp = path.join(staging, "asset");
   try {
-    fs.copyFileSync(src, tmp);
+    fs.copyFileSync(src, tmp, fs.constants.COPYFILE_EXCL);
     fs.renameSync(tmp, dest);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
+  } finally {
+    try {
+      fs.rmSync(staging, { recursive: true, force: true });
+    } catch {
+      // A cleanup error must not replace a copy/rename error or undo a successful replacement.
+    }
   }
 }

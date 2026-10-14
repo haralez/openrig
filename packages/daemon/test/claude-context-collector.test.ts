@@ -625,6 +625,7 @@ describe("re-seating the collector from a read-only asset", () => {
   beforeEach(() => { root = mkdtempSync(join(tmpdir(), "openrig-collector-readonly-")); });
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
+  /** Build a collector adapter using private real files and the supplied copy operation. */
   function adapterFor(asset: string, copyFile: (src: string, dest: string) => void) {
     return new ClaudeCodeAdapter({
       tmux: {} as TmuxAdapter, stateDir: join(root, "state"), collectorAssetPath: asset,
@@ -663,6 +664,6 @@ describe("re-seating the collector from a read-only asset", () => {
     adapter.ensureContextCollector({ cwd });
     expect(readFileSync(dest, "utf8")).toBe("// v2\n");
     expect(statSync(dest).mode & 0o222).toBe(0);
-    expect(readdirSync(join(cwd, ".openrig")).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    expect(readdirSync(join(cwd, ".openrig")).filter((f) => f.includes(".tmp"))).toEqual([]);
   });
 });
