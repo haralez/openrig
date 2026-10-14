@@ -48,6 +48,7 @@ function printSnapshotSelection(selection: LaunchResponse["snapshotSelection"]):
   if (newer?.snapshotId) console.log(`Newer usable alternative: ${newer.snapshotId}${newer.kind ? ` (${newer.kind})` : ""}`);
 }
 
+/** Build the launch command, allowing local subset launches a longer wait than previews. */
 export function launchCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("launch").description("Launch or relaunch a node in a running rig");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };

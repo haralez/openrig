@@ -5,6 +5,7 @@ import { launchCommand } from "../src/commands/launch.js";
 import { DaemonClient, DaemonTimeoutError } from "../src/client.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
+/** Pair the real client with an isolated daemon lifecycle fixture for command tests. */
 function deps(client: DaemonClient): StatusDeps {
   return {
     lifecycleDeps: {
