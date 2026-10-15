@@ -759,7 +759,7 @@ export class TmuxAdapter {
     let created = false;
     try {
       if (path) {
-        await this.fileOps.writeFile(path, `command rm -f -- ${shellQuote(path)}\n${options.execInScript ? "exec " : ""}${command}\n`, { mode: 0o600, flag: "wx" });
+        await this.fileOps.writeFile(path, `command rm -f -- ${shellQuote(path)} || /bin/rm -f -- ${shellQuote(path)} || true\n${options.execInScript ? "exec " : ""}${command}\n`, { mode: 0o600, flag: "wx" });
         created = true;
       }
       const text = beforeInput ? await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation, () => { check(); beforeInput(); }))

@@ -27,6 +27,24 @@ function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
 }
 
 describe("shell launch transport", () => {
+  it.each(["missing", "nonzero"])("keeps sourced launch alive with errexit when PATH rm is %s", async failure => {
+    const root = mkdtempSync(join(tmpdir(), "launch-cleanup-failure-"));
+    try {
+      const bin = join(root, "bin");
+      mkdirSync(bin);
+      if (failure === "nonzero") writeFileSync(join(bin, "rm"), "#!/bin/sh\nexit 72\n", { mode: 0o755 });
+      const f = fixture(undefined, join(root, "launch 'quoted'.sh"));
+      expect(await f.adapter.sendShellCommand("pane", "/bin/sh -c 'printf launched'", undefined, { sourceInPane: true })).toEqual({ ok: true });
+      writeFileSync(f.scriptPath, f.files.get(f.scriptPath)!, { mode: 0o600 });
+      const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+      expect(execFileSync("/bin/sh", ["-ec", invocation], {
+        encoding: "utf8", env: { ...process.env, PATH: bin },
+      })).toBe("launched");
+      // Systems with /bin/rm retain the previous cleanup route; otherwise the payload still runs.
+      expect(existsSync(f.scriptPath)).toBe(!existsSync("/bin/rm"));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each([
     { sourceInPane: false, execInScript: false },
     { sourceInPane: true, execInScript: false },
@@ -65,7 +83,7 @@ describe("shell launch transport", () => {
     const quotedPath = shellQuote(f.scriptPath);
     expect(invocation).toBe(`if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`);
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
-    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`);
+    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || /bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`);
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
@@ -112,7 +130,7 @@ describe("shell launch transport", () => {
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh ${shellQuote(f.scriptPath)}`);
-    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- ${shellQuote(f.scriptPath)}\nclaude\n`);
+    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- ${shellQuote(f.scriptPath)} || /bin/rm -f -- ${shellQuote(f.scriptPath)} || true\nclaude\n`);
   });
 
   it("keeps the short sh invocation when fish fallback syntax would exceed the input bound", async () => {
@@ -157,7 +175,7 @@ describe("shell launch transport", () => {
     const command = `env PATH='${"p".repeat(4096)}' codex -s workspace-write resume 'same-native-id' -m 'chosen-model'`;
     expect(await f.adapter.sendShellCommand("pane", command)).toEqual({ ok: true });
     expect(f.fileOps.writeFile).toHaveBeenNthCalledWith(1, f.scriptPath,
-      `command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`, { mode: 0o600, flag: "wx" });
+      `command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || /bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`, { mode: 0o600, flag: "wx" });
     const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
     expect(invocation).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
@@ -173,7 +191,7 @@ describe("shell launch transport", () => {
     const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
     expect(invocation).toBe(`( . '/tmp/launch '\"'\"'quoted'\"'\"'.sh' )`);
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
-    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`);
+    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || /bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`);
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
