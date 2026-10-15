@@ -49,7 +49,7 @@ describe("shell launch transport", () => {
     { sourceInPane: false, execInScript: false },
     { sourceInPane: true, execInScript: false },
     { sourceInPane: false, execInScript: true },
-  ])("removes the consumed script through PATH before launching (%j)", async options => {
+  ])("prefers absolute cleanup and uses PATH when unavailable before launching (%j)", async options => {
     const root = mkdtempSync(join(tmpdir(), "launch-cleanup-"));
     try {
       const bin = join(root, "bin");
@@ -63,12 +63,12 @@ describe("shell launch transport", () => {
       expect(await f.adapter.sendShellCommand("pane", "/bin/sh -c 'printf launched'", undefined, options)).toEqual({ ok: true });
       writeFileSync(f.scriptPath, f.files.get(f.scriptPath)!, { mode: 0o600 });
       const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
-      // A sourced script inherits functions; cleanup must still invoke the PATH executable.
+      // A sourced script inherits functions; the PATH fallback must bypass them.
       expect(execFileSync("/bin/sh", ["-c", `rm() { return 97; }; ${invocation}`], {
         encoding: "utf8", env: { ...process.env, PATH: bin },
       })).toBe("launched");
-      expect(existsSync(marker)).toBe(true);
-      expect(readFileSync(marker, "utf8")).toBe(`-f\n--\n${f.scriptPath}\n`);
+      expect(existsSync(marker)).toBe(!existsSync("/bin/rm"));
+      if (!existsSync("/bin/rm")) expect(readFileSync(marker, "utf8")).toBe(`-f\n--\n${f.scriptPath}\n`);
       expect(existsSync(f.scriptPath)).toBe(false);
       expect(readFileSync(retained, "utf8")).toBe("keep me");
     } finally { rmSync(root, { recursive: true, force: true }); }
@@ -83,7 +83,7 @@ describe("shell launch transport", () => {
     const quotedPath = shellQuote(f.scriptPath);
     expect(invocation).toBe(`if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`);
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
-    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || /bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`);
+    expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' 2>/dev/null || command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`);
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
@@ -130,7 +130,7 @@ describe("shell launch transport", () => {
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh ${shellQuote(f.scriptPath)}`);
-    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- ${shellQuote(f.scriptPath)} || /bin/rm -f -- ${shellQuote(f.scriptPath)} || true\nclaude\n`);
+    expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- ${shellQuote(f.scriptPath)} 2>/dev/null || command rm -f -- ${shellQuote(f.scriptPath)} || true\nclaude\n`);
   });
 
   it("keeps the short sh invocation when fish fallback syntax would exceed the input bound", async () => {
@@ -175,7 +175,7 @@ describe("shell launch transport", () => {
     const command = `env PATH='${"p".repeat(4096)}' codex -s workspace-write resume 'same-native-id' -m 'chosen-model'`;
     expect(await f.adapter.sendShellCommand("pane", command)).toEqual({ ok: true });
     expect(f.fileOps.writeFile).toHaveBeenNthCalledWith(1, f.scriptPath,
-      `command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || /bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`, { mode: 0o600, flag: "wx" });
+      `/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' 2>/dev/null || command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`, { mode: 0o600, flag: "wx" });
     const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
     expect(invocation).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
@@ -191,7 +191,7 @@ describe("shell launch transport", () => {
     const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
     expect(invocation).toBe(`( . '/tmp/launch '\"'\"'quoted'\"'\"'.sh' )`);
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
-    expect(f.files.get(f.scriptPath)).toBe(`command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || /bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`);
+    expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' 2>/dev/null || command rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh' || true\n${command}\n`);
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
