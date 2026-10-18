@@ -122,7 +122,7 @@ describe("single-attempt draft-aware delivery through the real transport", () =>
   });
 
 
-  it.each(["ordinary request ", "1. Review the change"])("submits ordinary authored text once: %j", async text => {
+  it.each(["ordinary request ", "1. Review the change", "[Pasted text #4]"])("submits ordinary authored text once: %j", async text => {
     const f = fixture(); await f.enable();
     expect(await f.send("ordinary", text)).toMatchObject({ ok: true, sent: true, delivery: { state: "complete" } });
     expect(await f.send("ordinary", text)).toMatchObject({ delivery: { state: "complete" } });
