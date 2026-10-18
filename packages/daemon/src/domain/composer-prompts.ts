@@ -145,7 +145,7 @@ export interface ComposerInput {
   ghost?: { line: number; offset: number; continuationRows: number };
 }
 
-export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+ \+(\d+) lines\]$/;
+export const COMPOSER_COLLAPSED_PASTE_PATTERN = /^\[Pasted text #\d+(?: \+(\d+) lines)?\]$/;
 
 /** Preserve characters and spaces within rows. Only a real line break, a full
  * terminal row, or a word that cannot fit may explain a rendered row boundary.
@@ -180,5 +180,9 @@ export function composerContainsOwnedText(input: ComposerInput, expected: string
 export function ownCollapsedPaste(input: ComposerInput, expected: string): string | null {
   if (input.collapsedPaste && input.cursorAtEnd && input.pasteMatchesExpected) return input.collapsedPaste;
   const match = input.collapsedPaste && input.cursorAtEnd ? COMPOSER_COLLAPSED_PASTE_PATTERN.exec(input.collapsedPaste) : null;
-  return match && Number(match[1]) === expected.split("\n").length - 1 ? input.collapsedPaste : null;
+  if (!match) return null;
+  const newlines = expected.split("\n").length - 1;
+  // Claude omits the line count for a long single-line paste.
+  return (match[1] === undefined ? newlines === 0 && expected.length >= 200 : Number(match[1]) === newlines)
+    ? input.collapsedPaste : null;
 }

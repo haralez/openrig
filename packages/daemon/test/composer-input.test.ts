@@ -10,6 +10,16 @@ function claude(body: string, cursor?: { x: number; y: number }, width = 80): Co
 }
 
 describe("cursor-bound composer input", () => {
+  it("recognizes an uncounted collapsed label only for a long single-line paste at the end cursor", () => {
+    const text = "x".repeat(200);
+    const input = inspectComposerInput(claude("[Pasted text #4]"));
+    expect(ownCollapsedPaste(input, text)).toBe("[Pasted text #4]");
+    expect(ownCollapsedPaste(input, text.slice(1))).toBeNull();
+    expect(ownCollapsedPaste(input, `${text}\nsecond`)).toBeNull();
+    expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #4]", { x: 2, y: 2 })), text)).toBeNull();
+    expect(ownCollapsedPaste(inspectComposerInput(claude("[Pasted text #4] extra")), text)).toBeNull();
+  });
+
   it("keeps nested prompt examples inside the current draft, including when its head is clipped", () => {
     const body = "intro\n────────────────────\n❯ \n────────────────────\n? for shortcuts\n────────────────────\n❯ ";
     const snapshot = claude(body, { x: 4, y: 8 });

@@ -97,6 +97,31 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
 
 
 describe("single-attempt draft-aware delivery through the real transport", () => {
+  it("submits its own long single-line collapsed paste once", async () => {
+    const f = fixture(); await f.enable();
+    const text = "long outgoing message ".repeat(20);
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      frame(f.bodies.a === text ? "[Pasted text #4]" : f.bodies.a ?? ""));
+    expect(await f.send("single-line-paste", text, { verify: false })).toMatchObject({ ok: true, sent: true, delivery: { state: "complete" } });
+    expect(f.submissions).toEqual([text]);
+    await f.send("single-line-paste", text, { verify: false });
+    expect(f.submissions).toEqual([text]);
+  });
+  it("withholds Enter if its single-line collapsed label changes after paste", async () => {
+    const f = fixture(); await f.enable();
+    const text = "long outgoing message ".repeat(20);
+    let label = "[Pasted text #4]";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      frame(f.bodies.a === text ? label : f.bodies.a ?? ""));
+    f.hooks.sleep = ms => { if (ms === 200) label = "[Pasted text #5]"; };
+    expect(await f.send("changed-single-line-paste", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_changed", delivery: { state: "indeterminate" } });
+    expect(f.submissions).toEqual([]);
+    await f.send("changed-single-line-paste", text, { verify: false });
+    expect(f.writes.filter(write => write.startsWith("paste:"))).toHaveLength(1);
+    expect(f.submissions).toEqual([]);
+  });
+
+
   it.each(["ordinary request ", "1. Review the change"])("submits ordinary authored text once: %j", async text => {
     const f = fixture(); await f.enable();
     expect(await f.send("ordinary", text)).toMatchObject({ ok: true, sent: true, delivery: { state: "complete" } });
