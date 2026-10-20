@@ -268,6 +268,11 @@ until the seats are ready. A kernel stopped with `rig down kernel`, including
 one whose seats were already detached, stays down on later starts. So do a kernel
 with only some seats stopped and seats you unclaimed. Start one again with
 `rig up kernel --existing`.
+When the tmux server is gone, an explicit `rig down` of any rig can start an
+empty server and probe again. It records the stop and clears eligible bindings
+only after confirming the sessions are absent. This can leave an empty tmux
+server running; it never launches an agent or provider session. Unreadable or
+permission results and changed occupants leave the stop bookkeeping unchanged.
 
 While that automatic restore runs, `rig start` continues to your other rigs and
 says the kernel is still restoring (`kernelRestore.state: "restoring"` with
@@ -276,10 +281,11 @@ says the kernel is still restoring (`kernelRestore.state: "restoring"` with
 still goes on to your other rigs but exits 1 (`kernelRestore.state: "failed"`),
 so `rig start && next` does not run `next`. A `rig down kernel` made during the
 restore waits for it to return and then stops the kernel, which stays down on
-later starts. A `rig up kernel --existing` with no other options, made during
-the restore, or after it restored every seat while those seats still run the
-sessions it started, reports that restore's outcome instead of starting another;
-one with other options is not merged into it.
+later starts. A `rig up kernel --existing` with no fresh seats and no change to
+the saved non-interruptive choice, made during the restore, or after it restored
+every seat while those seats still run the sessions it started, reports that
+restore's outcome instead of starting another. Explicitly repeating the saved
+`--non-interruptive` or `--no-non-interruptive` choice also joins that restore.
 
 An explicit `rig up kernel --existing --fresh <seat...>` waits for startup's
 restore to finish, then replaces only the named seats that still hold the exact

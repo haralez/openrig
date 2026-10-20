@@ -1,6 +1,6 @@
 // #1078 — what a manual `rig up kernel --existing` does while daemon start is restoring the kernel.
 // The same restore waits for the running one and reports its outcome; a request for something else
-// (non-interruptive choice, plan) is not merged. An explicit request after an operator correction
+// (a different non-interruptive choice, plan) is not merged. An explicit request after an operator correction
 // replaces only startup's exact corrected occupant. Real SQLite, reconcile, restore and HTTP
 // routes; terminal and provider I/O are fixtures, with the automatic launch held at a gate.
 // Derived from dev-review's boundary reproductions in its reviews of bc72e6bf and 0bd8f934.
@@ -9,17 +9,55 @@ import { describe, it, expect } from "vitest";
 import { corrected, heldRestore, name, token } from "./helpers/held-kernel-restore.js";
 
 describe("manual up while daemon start restores the kernel", () => {
-  it.each([true, false])("a non-interruptive choice (%s) is not merged", async (nonInterruptive) => {
-    const h = await heldRestore({ at: "create" });
+  it.each([[false, "during"], [true, "during"], [false, "after"], [true, "after"]] as const)("an equal non-interruptive choice (%s) joins %s startup restore", async (nonInterruptive, when) => {
+    const h = await heldRestore({ at: "create", nonInterruptive });
     try {
-      // It waits on the seat leases the automatic restore holds; it is never reported as that
-      // restore's outcome and launches nothing of its own while the rig is up.
-      const collision = h.up({ nonInterruptive });
-      await h.finish();
-      const response = await collision;
-      expect(response.status).toBeGreaterThanOrEqual(400);
-      expect(JSON.stringify(await response.json())).not.toContain("no second restore");
+      if (when === "after") await h.finish();
+      let settled = false;
+      const request = h.up({ nonInterruptive }).then(response => { settled = true; return response; });
+      if (when === "during") {
+        await new Promise(r => setTimeout(r, 20));
+        expect(settled).toBe(false);
+        await h.finish();
+      }
+      const response = await request;
+      const body = await response.json();
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      expect(body).toMatchObject({ status: "restored", rigResult: "fully_restored" });
+      expect(body.warnings.join(" ")).toContain("no second restore was started");
       expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(h.tmux.killSession).not.toHaveBeenCalled();
+      expect(h.db.prepare("SELECT non_interruptive FROM rigs WHERE id = ?").get(h.rig.id)).toEqual({ non_interruptive: nonInterruptive ? 1 : 0 });
+    } finally { h.close(); }
+  });
+
+  it.each([[false, "during"], [true, "during"], [false, "after"], [true, "after"]] as const)("a different launch choice from %s refuses %s startup restore", async (saved, when) => {
+    const h = await heldRestore({ at: "create", nonInterruptive: saved });
+    try {
+      if (when === "after") await h.finish();
+      const request = h.up({ nonInterruptive: !saved });
+      if (when === "during") await h.finish();
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toMatch(/launch choice.*unchanged.*Stop the rig.*rerun/);
+      expect(h.db.prepare("SELECT non_interruptive FROM rigs WHERE id = ?").get(h.rig.id)).toEqual({ non_interruptive: saved ? 1 : 0 });
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(h.tmux.killSession).not.toHaveBeenCalled();
+    } finally { h.close(); }
+  });
+
+  it.each([false, true])("rechecks an initially equal choice (%s) after waiting for automatic restore", async saved => {
+    const h = await heldRestore({ at: "create", nonInterruptive: saved });
+    try {
+      const request = h.up({ nonInterruptive: saved });
+      await new Promise(r => setTimeout(r, 20));
+      h.db.prepare("UPDATE rigs SET non_interruptive = ? WHERE id = ?").run(saved ? 0 : 1, h.rig.id);
+      await h.finish();
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect((await response.json()).error).toMatch(/launch choice.*unchanged/);
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(h.tmux.killSession).not.toHaveBeenCalled();
     } finally { h.close(); }
   });
 

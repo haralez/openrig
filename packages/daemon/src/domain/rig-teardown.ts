@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { TmuxAdapter, SessionProbe } from "../adapters/tmux.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { EventBus } from "./event-bus.js";
 import { RigNotFoundError } from "./errors.js";
@@ -51,6 +51,13 @@ interface LatestNodeSession {
   resumeType: string | null;
   resumeToken: string | null;
   cwd: string | null;
+}
+
+/** Only a reported missing server permits a bootstrap; other unreadable/permission results do not. */
+function isMissingTmuxServer(probe: SessionProbe): boolean {
+  if (probe.state !== "transport_unavailable" || /permission denied|operation not permitted|EACCES|EPERM/i.test(probe.cause)) return false;
+  return /no server running/i.test(probe.cause)
+    || /(?:error connecting to|tmux-\d+)[^\n]*(?:No such file or directory|Connection refused)/i.test(probe.cause);
 }
 
 /**
@@ -251,15 +258,26 @@ export class RigTeardownOrchestrator {
     for (const row of eligible.all(rigId) as Array<{ id: string; node_id: string; session_name: string }>) {
       const binding = this.deps.sessionRegistry.getBindingForNode(row.node_id);
       if (binding && (binding.attachmentType !== "tmux" || binding.tmuxSession !== row.session_name)) continue;
+      const stillEligible = () => (eligible.all(rigId) as Array<{ id: string }>).some(current => current.id === row.id)
+        && JSON.stringify(this.deps.sessionRegistry.getBindingForNode(row.node_id)) === JSON.stringify(binding);
       try {
-        if ((await probe.call(this.deps.tmuxAdapter, row.session_name)).state !== "absent") continue;
+        let observed = await probe.call(this.deps.tmuxAdapter, row.session_name);
+        if (!stillEligible()) continue;
+        if (isMissingTmuxServer(observed)) {
+          // A reboot may have removed tmux's server/socket. Start only an empty server, then
+          // demand positive session absence; transport_unavailable itself proves nothing.
+          const started = await this.deps.tmuxAdapter.startServer();
+          if (!stillEligible() || !started.ok) continue;
+          observed = await probe.call(this.deps.tmuxAdapter, row.session_name);
+          if (!stillEligible()) continue;
+        }
+        if (observed.state !== "absent") continue;
       } catch {
         continue;
       }
       this.db.transaction(() => {
-        // A launch may have rebound the node while the absence probe awaited.
-        if ((eligible.all(rigId) as Array<{ id: string }>).some(current => current.id === row.id)
-          && JSON.stringify(this.deps.sessionRegistry.getBindingForNode(row.node_id)) === JSON.stringify(binding)) {
+        // Every await above can admit a new binding or latest session. Check again at the write.
+        if (stillEligible()) {
           this.deps.sessionRegistry.markIntentionallyStopped(row.id);
           this.deps.sessionRegistry.clearBinding(row.node_id);
         }

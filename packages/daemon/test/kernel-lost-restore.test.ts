@@ -4,6 +4,7 @@
 // the way daemon start does, with the restore itself stubbed.
 
 import { Hono } from "hono";
+import { noServerTerminal } from "./helpers/no-server-terminal.js";
 import { kernelStatusRoutes } from "../src/routes/kernel-status.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -112,6 +113,37 @@ describe("daemon start with an existing kernel rig", () => {
     expect(restore).toHaveBeenCalledWith(h.rig.id);
     expect(tracker.getStatus().kernelState).toBe("booting");
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "no server running on /tmp/tmux-1000/default",
+    "error connecting to /tmp/tmux-1000/default (No such file or directory)",
+    "error connecting to /tmp/tmux-1000/default (Connection refused)",
+  ])("reboot, explicit down, next start stays stopped with real no-server probe: %s", async cause => {
+    const h = host();
+    const terminal = noServerTerminal(cause);
+    h.tmux.probeSession = terminal.probeSession;
+    h.tmux.startServer = terminal.startServer;
+    h.reboot();
+    await h.reconcile();
+    expect(h.statuses()).toEqual(["detached", "detached"]);
+    expect(await terminal.probeSession(h.nodes[0]!.name)).toEqual({ state: "transport_unavailable", cause });
+    const down = await h.down();
+    expect(down).toMatchObject({ alreadyStopped: true, sessionsKilled: 0, errors: [] });
+    expect(h.statuses()).toEqual(["exited", "exited"]);
+    expect(h.db.prepare("SELECT intentionally_stopped FROM sessions").all()).toEqual([{ intentionally_stopped: 1 }, { intentionally_stopped: 1 }]);
+    for (const { node } of h.nodes) expect(h.sessionRegistry.getBindingForNode(node.id)).toBeNull();
+    expect(terminal.startServer).toHaveBeenCalledTimes(1);
+    expect(terminal.serverRunning()).toBe(true);
+    expect(await terminal.probeSession(h.nodes[0]!.name)).toEqual({ state: "absent" });
+    expect(terminal.commands.some(command => /new-session|send-keys|kill-session/.test(command))).toBe(false);
+    const restore = vi.fn(async () => ({ errors: [] }));
+    const tracker = await h.daemonStart(restore);
+    expect(tracker.getStatus().kernelState).toBe("skipped");
+    expect(restore).not.toHaveBeenCalled();
+    expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
+    expect(h.tmux.killSession).not.toHaveBeenCalled();
+    tracker.stop();
   });
 
   it("a kernel stopped with `rig down kernel` stays stopped across daemon restarts", async () => {

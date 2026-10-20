@@ -103,10 +103,11 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   // Daemon start restores a kernel a reboot left down. A request for that same restore, made while it
   // runs or just after, gets its outcome instead of a second launch or a refusal; see
   // joinAutomaticRestore for when the seats still count as that restore's. A request for something
-  // else (--fresh seats, a non-interruptive choice, a plan) takes the ordinary path.
-  if (!plan && !freshLogicalIds?.length && nonInterruptive === undefined) {
+  // else (--fresh seats, a different non-interruptive choice, a plan) takes the ordinary path.
+  const sameLaunchChoice = () => nonInterruptive === undefined || nonInterruptive === deps.rigRepo.getRigNonInterruptive(rigId);
+  if (!plan && !freshLogicalIds?.length && sameLaunchChoice()) {
     const joined = await joinAutomaticRestore(deps, rigId);
-    if (joined) return renderExistingRestore(rigId, rigName, deps, c, joined, true);
+    if (joined && sameLaunchChoice()) return renderExistingRestore(rigId, rigName, deps, c, joined, true);
   }
   const choice = chooseRestoreSnapshot(deps, rigId);
   if (!choice.ok) return c.json(choice.body, choice.status);
