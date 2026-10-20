@@ -1,4 +1,6 @@
 import nodePath from "node:path";
+import { shellQuote } from "../adapters/shell-quote.js";
+import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import type Database from "better-sqlite3";
 import {
   resolvePermissionPolicyAttachment,
@@ -28,6 +30,13 @@ interface RigInstantiatorDeps {
   nodeLauncher: NodeLauncher;
   preflight: RigSpecPreflight;
   tmuxAdapter?: import("../adapters/tmux.js").TmuxAdapter;
+}
+
+function partialEnvCleanupGuidance(rigId: string, logicalId: string, error: string): string {
+  const launch = `rig launch ${shellQuote(rigId)} ${shellQuote(logicalId)}`;
+  const remove = `rig down ${shellQuote(rigId)} --delete`;
+  return error.replace(/ Run it again\.$/, "")
+    + ` This team has been kept. To relaunch only "${logicalId}", run: ${launch}. This does not reapply the unsaved --env values. If those values are needed, first run: ${remove}. This stops and removes the team this launch just created. Then re-run the original rig up command with --env.`;
 }
 
 export class RigInstantiator {
@@ -65,7 +74,7 @@ export class RigInstantiator {
     this.tmuxAdapter = deps.tmuxAdapter;
   }
 
-  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean }): Promise<InstantiateOutcome> {
+  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean; env?: SeatEnv }): Promise<InstantiateOutcome> {
     // 1. Validate
     const raw = RigSpecCodec.parse(RigSpecCodec.serialize(spec));
     const validation = RigSpecSchema.validate(raw);
@@ -147,9 +156,11 @@ export class RigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed"; error?: string }[] = [];
     const launchedSessionNames: string[] = [];
     const instantiateWarnings: string[] = [];
+    const envCleanupErrors: string[] = [];
+    const envCleanupFailures: { logicalId: string; error: string }[] = [];
 
     for (const logicalId of launchOrder) {
-      const result = await this.nodeLauncher.launchNode(rigId!, logicalId);
+      const result = await this.nodeLauncher.launchNode(rigId!, logicalId, opts?.env ? { env: opts.env } : undefined);
       if (result.ok) {
         nodeResults.push({ logicalId, status: "launched" });
         launchedSessionNames.push(result.sessionName);
@@ -157,7 +168,12 @@ export class RigInstantiator {
           instantiateWarnings.push(...result.warnings);
         }
       } else {
-        nodeResults.push({ logicalId, status: "failed", error: result.message });
+        const failure = { logicalId, status: "failed" as const, error: result.message };
+        nodeResults.push(failure);
+        if (result.code === "seat_env_cleanup_failed") {
+          envCleanupFailures.push(failure);
+          envCleanupErrors.push(`${logicalId}: ${result.message}`);
+        }
       }
     }
 
@@ -179,9 +195,17 @@ export class RigInstantiator {
       return {
         ok: false,
         code: "instantiate_error",
-        message: "all node launches failed",
+        message: envCleanupErrors.length ? `all node launches failed — ${envCleanupErrors.join("; ")}` : "all node launches failed",
+        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
       };
     }
+
+    // A partial launch keeps the rig: repeating up would collide with its live seats.
+    // Leave all-failed retry guidance and any unconfirmed-removal warning intact.
+    envCleanupFailures.forEach((failure, index) => {
+      failure.error = partialEnvCleanupGuidance(rigId!, failure.logicalId, failure.error);
+      envCleanupErrors[index] = `${failure.logicalId}: ${failure.error}`;
+    });
 
     // 6. Propagate restorePolicy to session metadata (best-effort)
     try {
@@ -221,6 +245,7 @@ export class RigInstantiator {
       ok: true,
       result: {
         rigId: rigId!,
+        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
         specName: spec.name,
         specVersion: spec.version,
         nodes: nodeResults,
@@ -306,7 +331,7 @@ import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
 import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
-import { resolveNodeConfig } from "./profile-resolver.js";
+import { resolveNodeConfig, selectedPluginPaths } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
@@ -323,6 +348,7 @@ import type {
 } from "./continuity-policy-materializer.js";
 import { isKeptPluginSkill, type ReconcileSkillLoadoutResult, type SkillLoadout, type SkillRuntime } from "./skill-catalog.js";
 import type { SystemWorldResolution } from "./system-world.js";
+import type { SeatEnv } from "./seat-env.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -545,6 +571,8 @@ export class PodRigInstantiator {
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
+      // No session follows a materialize; `rig adopt` binds sessions already running under their own names.
+      materializeOnly: true,
       exec: this.deps.exec,
       claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
     });
@@ -666,6 +694,7 @@ export class PodRigInstantiator {
         // Guard-F1: the RESOLVED rig attachment persists too (declaringDir = THIS rigRoot,
         // the original declaring RigSpec dir) — restart-complete for organic seats,
         // add-member under a different root, and successor continuity. STRICT (load-bearing).
+        if (rigSpec.env) this.deps.rigRepo.setRigEnv(materializedRigId, rigSpec.env);
         if (rigSpec.permissionPolicy) {
           this.deps.rigRepo.setRigPermissionPolicy(materializedRigId, rigSpec.permissionPolicy);
           const rigAttachment = resolvePermissionPolicyAttachment(rigSpec.permissionPolicy, rigRoot, {
@@ -1231,7 +1260,7 @@ export class PodRigInstantiator {
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
     // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
     // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
@@ -1257,7 +1286,7 @@ export class PodRigInstantiator {
     }
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1356,6 +1385,7 @@ export class PodRigInstantiator {
       // OPR.0.4.8.3 Seam B: the SECOND rig-persist site (bootstrap instantiate path) —
       // both sites must write or the rig ref silently drops on one instantiate path.
       // Guard-F1: resolved rig attachment persists here too (declaringDir = rigRoot).
+      if (rigSpec.env) this.deps.rigRepo.setRigEnv(rigId, rigSpec.env);
       if (rigSpec.permissionPolicy) {
         this.deps.rigRepo.setRigPermissionPolicy(rigId, rigSpec.permissionPolicy);
         const rigAttachment = resolvePermissionPolicyAttachment(rigSpec.permissionPolicy, rigRoot, {
@@ -1376,7 +1406,7 @@ export class PodRigInstantiator {
     }
 
     // 5. Create pods + nodes + edges, then launch in topological order
-    const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string }[] = [];
+    const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
     const podInstantiateWarnings = preflight.warnings;
@@ -1460,7 +1490,7 @@ export class PodRigInstantiator {
         // Terminal fast-path: skip agent resolution and profile resolution
         if (member.agentRef === "builtin:terminal") {
           const termResult = await this.processTerminalMember(
-            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings, opts?.cwdOverride,
+            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings, opts?.cwdOverride, opts?.env,
           );
           nodeResults.push(termResult);
           continue;
@@ -1516,6 +1546,7 @@ export class PodRigInstantiator {
             // site (see the role wire note above) — same member-ref persistence as
             // createMemberNode or `rig up <spec>` seats lose their policy ref.
             permissionPolicy: member.permissionPolicy,
+            env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
             restorePolicy: configResult.config.restorePolicy,
@@ -1552,6 +1583,7 @@ export class PodRigInstantiator {
           rigSpec,
           rigRoot,
           cwdOverride: opts?.cwdOverride,
+          envOverride: opts?.env,
           force: opts?.force,
           pod,
           member,
@@ -1569,6 +1601,7 @@ export class PodRigInstantiator {
         nodeResults.push({
           logicalId: qualifiedId,
           status: launched.status,
+          code: launched.code,
           error: launched.error,
           evidence: launched.evidence,
           sessionName: launched.sessionName,
@@ -1615,6 +1648,8 @@ export class PodRigInstantiator {
     const hasAttention = nodeResults.some((n) => n.status === "attention_required");
     const hasLaunched = nodeResults.some((n) => n.status === "launched");
     const allTerminal = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
+    const envCleanupFailures = nodeResults.filter((n) => n.code === "seat_env_cleanup_failed");
+    const envCleanupErrors = envCleanupFailures.map((n) => `${n.logicalId}: ${n.error}`);
 
     if (allTerminal) {
       let serviceCleanupError: string | undefined;
@@ -1648,8 +1683,18 @@ export class PodRigInstantiator {
       if (guard) await guard.lifecycle(Object.values(nodeIdMap), cleanup);
       else await cleanup();
       const details = nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "unknown"}`).join("; ");
-      return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}${serviceCleanupError ? `; ${serviceCleanupError}` : ""}` };
+      return {
+        ok: false, code: "instantiate_error",
+        message: `all node launches/startups failed — ${details}${serviceCleanupError ? `; ${serviceCleanupError}` : ""}`,
+        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
+      };
     }
+
+    // The rig is retained; show the same recovery choices as a flat partial.
+    envCleanupFailures.forEach((failure, index) => {
+      failure.error = partialEnvCleanupGuidance(rigId, failure.logicalId, failure.error ?? "Launch environment cleanup failed.");
+      envCleanupErrors[index] = `${failure.logicalId}: ${failure.error}`;
+    });
 
     if (hasAttention && !hasLaunched) {
       // All-attention_required path — rig + sessions PRESERVED; no
@@ -1678,7 +1723,7 @@ export class PodRigInstantiator {
       return {
         ok: false,
         code: "attention_required",
-        message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.`,
+        message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.${envCleanupErrors.length ? ` ${envCleanupErrors.join("; ")}` : ""}`,
         rigId,
         attentionNodes,
         // #141: the replacement is kept on this path, so its archive notice must reach the user too.
@@ -1711,7 +1756,7 @@ export class PodRigInstantiator {
 
     return {
       ok: true,
-      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: resultNodes, warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
+      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: resultNodes, ...(envCleanupErrors.length ? { envCleanupErrors } : {}), warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
     };
   }
 
@@ -1789,7 +1834,8 @@ export class PodRigInstantiator {
     launchedSessionNames: string[],
     warnings: string[],
     cwdOverride?: string,
-  ): Promise<{ logicalId: string; status: "launched" | "failed"; error?: string }> {
+    envOverride?: SeatEnv,
+  ): Promise<{ logicalId: string; status: "launched" | "failed"; code?: string; error?: string }> {
     const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, cwdOverride);
     // Create node with sentinel values
     let nodeId: string;
@@ -1798,6 +1844,7 @@ export class PodRigInstantiator {
         runtime: member.runtime,
         model: member.model,
         effort: member.effort,
+        env: member.env,
         cwd: effectiveCwd,
         restorePolicy: "checkpoint_only",
         podId,
@@ -1816,6 +1863,7 @@ export class PodRigInstantiator {
       rigSpec,
       rigRoot,
       cwdOverride,
+      envOverride,
       pod,
       member,
       qualifiedId,
@@ -1830,6 +1878,7 @@ export class PodRigInstantiator {
     return {
       logicalId: qualifiedId,
       status: launched.status,
+      code: launched.code,
       error: launched.error,
     };
   }
@@ -1872,6 +1921,7 @@ export class PodRigInstantiator {
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
       permissionPolicy: input.member.permissionPolicy,
+      env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
       restorePolicy: input.member.restorePolicy,
@@ -1907,6 +1957,7 @@ export class PodRigInstantiator {
     qualifiedId: string;
     nodeId: string;
     cwdOverride?: string;
+    envOverride?: SeatEnv;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
@@ -1961,12 +2012,14 @@ export class PodRigInstantiator {
     qualifiedId: string;
     nodeId: string;
     cwdOverride?: string;
+    /** One-off `rig up --env` values for this launch; not saved with the seat. */
+    envOverride?: SeatEnv;
     /** P20 atom-4 — operator override: overwrite operator-edited (operator_conflict)
      *  projection targets instead of protecting them. Absent = protect (safe default). */
     force?: boolean;
     resolveResult?: ReturnType<typeof resolveAgentRef> extends infer T ? T : never;
     configResult?: ReturnType<typeof resolveNodeConfig> extends infer T ? T : never;
-  }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+  }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingAgentMember(input));
@@ -2063,9 +2116,11 @@ export class PodRigInstantiator {
     const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, {
       sessionName: canonicalSessionName,
       silenceWindowSeconds: configResult.config.activity?.silenceWindowSeconds,
+      env: input.envOverride,
+      pluginPaths: selectedPluginPaths(configResult.config.selectedResources),
     });
     if (!launchResult.ok) {
-      return { status: "failed", error: launchResult.message };
+      return { status: "failed", code: launchResult.code, error: launchResult.message };
     }
 
     try {
@@ -2133,8 +2188,8 @@ export class PodRigInstantiator {
     );
     const managedDedupedFiles = this.dedupeProjectedManagedStartupFiles(planResult.plan, resolvedFiles);
     // P20 atom-4 PROTECT: hold back operator-edited skill targets (operator_conflict)
-    // so the adapter never overwrites an operator's edit — unless the operator forces
-    // it (input.force). The per-conflict warning already tells the operator this.
+    // so the adapter never overwrites an operator's edit unless an internal caller sets
+    // input.force. The warning names the source-edit/move-aside remedies available to users.
     const dedupedResolvedFiles = filterProtectedProjections(
       managedDedupedFiles,
       planResult.plan,
@@ -2152,7 +2207,9 @@ export class PodRigInstantiator {
       updatedAt: "",
       cwd: configResult.config.cwd,
       model: configResult.config.model,
-      effort: configResult.config.effort,
+      // The seat's saved effort choice wins over the authored value just written by
+      // updateNodeResolvedConfig; a seat without one launches with exactly that authored value.
+      effort: (readSeatEffort(this.deps.rigRepo.db, input.nodeId) ?? { effective: configResult.config.effort ?? null }).effective ?? undefined,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > FLOOR)
       // binds per-seat explicitly; adapters thread it into the yolo-mode helpers.
@@ -2344,7 +2401,8 @@ export class PodRigInstantiator {
     qualifiedId: string;
     nodeId: string;
     cwdOverride?: string;
-  }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
+    envOverride?: SeatEnv;
+  }): Promise<{ status: "launched" | "failed"; code?: string; error?: string; sessionName?: string; warnings?: string[] }> {
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
@@ -2362,9 +2420,9 @@ export class PodRigInstantiator {
     }
 
     const canonicalSessionName = deriveCanonicalSessionName(input.pod.id, input.member.id, input.rigSpec.name);
-    const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName });
+    const launchResult = await this.deps.nodeLauncher.launchNode(input.rigId, input.qualifiedId, { sessionName: canonicalSessionName, env: input.envOverride });
     if (!launchResult.ok) {
-      return { status: "failed", error: launchResult.message };
+      return { status: "failed", code: launchResult.code, error: launchResult.message };
     }
 
     try {
@@ -2462,6 +2520,14 @@ export class PodRigInstantiator {
       );
       // Always write the resolved effort — present value sets it, absent value
       // clears a previously-stored effort so spec changes take effect on next launch.
+      // OPR.0.7.0.7: a seat's saved effort choice is a separate value; whether a refresh keeps
+      // it is the founder's open precedence decision, asked of the one seam.
+      const before = readSeatEffort(this.deps.rigRepo.db, nodeId);
+      if (before?.choice && effortPrecedence.specRefreshChoice({
+        choice: before.choice, authoredBefore: before.authored, authoredAfter: config.effort?.trim() || null,
+      }) === "clear") {
+        this.deps.rigRepo.setNodeEffortChoice(nodeId, null);
+      }
       if (config.effort) {
         this.deps.rigRepo.setNodeEffort(nodeId, config.effort);
       } else {
@@ -2644,6 +2710,7 @@ export class PodRigInstantiator {
       "This is your startup identity hint. For durable identity recovery after compaction, run:",
       "  rig whoami --json",
       "That command returns your full topology context: rig, pod, peers, edges, and transcript path.",
+      "If its peersNote says some peers are not shown, rig whoami --json --all-peers lists them all.",
     ].filter((line): line is string => Boolean(line));
 
     return {

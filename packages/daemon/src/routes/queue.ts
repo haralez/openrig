@@ -20,10 +20,11 @@ import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-re
 import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { deriveCurrentWork, deriveRole, deriveWorkCandidates, type RoleOrientation } from "../domain/current-work.js";
+import { deriveCurrentWork, deriveCurrentWorkChoice, deriveRole, deriveWorkCandidates, type RoleOrientation } from "../domain/current-work.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import type { HumanQuestion } from "../domain/human-questions.js";
+import { queryLimit, SQL_LIMIT_BOUND } from "./query-limit.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -117,7 +118,7 @@ export function queueRoutes(): Hono {
       return {
         ok: false,
         error: "unknown_target_repo",
-        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --json | jq .workspace.repos to see declared repos`,
+        message: `target_repo "${targetRepo}" does not match any repo in rig ${rigName}'s workspace; check rig whoami --full --json | jq .workspace.repos to see declared repos`,
         meta: { rigName, knownRepos: known },
       };
     }
@@ -181,6 +182,23 @@ export function queueRoutes(): Hono {
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.
         : err.code === "workflow_frontier_packet" ? 400
+        // Park/close input the caller can fix (wake options on a non-park transition, closure
+        // fields or blocked_on on a transition that cannot store them) are client errors, not
+        // daemon faults. wake_intent_store_unavailable, outbox_db_mismatch and
+        // terminal_close_without_wake_intent describe the daemon's own state and stay 500.
+        // blocker_not_found / blocker_not_live / blocker_malformed stay 500 on purpose: the CLI
+        // tests pin their exit code 2 (queue-update-metadata-reject-cli.test.ts).
+        : err.code === "closure_fields_not_admitted" ? 400
+        : err.code === "blocked_on_not_admitted" ? 400
+        : err.code === "wake_not_admitted" ? 400
+        : err.code === "wake_ambiguous" ? 400
+        : err.code === "wake_after_invalid" ? 400
+        : err.code === "wake_max_invalid" ? 400
+        : err.code === "wake_message_not_admitted" ? 400
+        : err.code === "wake_message_invalid" ? 400
+        : err.code === "wake_watchdog_not_live" ? 400
+        : err.code === "wake_watchdog_target_mismatch" ? 400
+        : err.code === "wake_self_blocker" ? 400
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
@@ -336,6 +354,8 @@ export function queueRoutes(): Hono {
       summary?: string | null;
       evidenceRef?: string | null;
       nudge?: boolean;
+      /** How the sender's identity was established, recorded on the source close as a local handoff records it. */
+      identityProvenance?: string | null;
     },
     createSuccessor: (forwardBody: Record<string, unknown>) => Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> =
       (forwardBody) => forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody),
@@ -409,6 +429,7 @@ export function queueRoutes(): Hono {
         closureTarget: closeTarget,
         terminalState,
         transitionNote: body.transitionNote,
+        identityProvenance: body.identityProvenance ?? null,
       });
     } catch (err) {
       return errorResponse(c, err);
@@ -608,6 +629,7 @@ export function queueRoutes(): Hono {
       transitionNote?: string;
       closureReason?: string;
       closureTarget?: string;
+      resolution?: unknown;
       blockedOn?: string;
       wakeWatchdogId?: string;
       wakeAfterSeconds?: number;
@@ -631,6 +653,8 @@ export function queueRoutes(): Hono {
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,
         closureTarget: body.closureTarget,
+        // Only text can be an outcome; any other value is treated as absent.
+        resolution: typeof body.resolution === "string" ? body.resolution : undefined,
         // OPR.0.4.4.19 FR-6 — the leg-1 park surface: blockedOn plus the
         // park-time summary/evidence_ref persist inputs.
         blockedOn: body.blockedOn,
@@ -694,6 +718,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody);
@@ -773,6 +799,8 @@ export function queueRoutes(): Hono {
       summary: body.summary,
       evidenceRef: body.evidenceRef,
       nudge: body.nudge,
+      // The source close is request-authored, so it carries the same stamp the local path records.
+      identityProvenance: resolveRecordedProvenance(c, identity),
     };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody);
@@ -850,6 +878,14 @@ export function queueRoutes(): Hono {
     // the unbounded in-progress set, which makes it independent of recentLimit.
     const inProgress = repo.listInProgressForDestination(session);
     const derived = deriveCurrentWork(inProgress, missionsRoot);
+    const lookups = {
+      getRow: (qitemId: string) => repo.getById(qitemId) ?? null,
+      continuationOf: (qitemId: string) => repo.currentParkContinuation(qitemId),
+    };
+    // When no single work node is settled, the plain answer names every in-progress
+    // candidate and asks the agent to choose, rather than a count alone.
+    const choice = deriveCurrentWorkChoice(derived, inProgress, missionsRoot, lookups);
+    const choiceField = choice ? { currentWorkChoice: choice } : {};
     let role: RoleOrientation = { state: "unknown", reason: "calling node unavailable", files: [] };
     try {
       const identity = (c.get("whoamiService" as never) as WhoamiService | undefined)
@@ -858,21 +894,24 @@ export function queueRoutes(): Hono {
     } catch { /* Ambiguous/unavailable identity is not an absent role declaration. */ }
     // OPR.0.7.0.12: labelled work candidates for the refocus packet, only on request, so the
     // default answer is unchanged. In-progress rows are the candidate evidence, so they come
-    // from the same unbounded read as the derivation; held/next work is a bounded display list.
+    // from the same unbounded read as the derivation; held and next work are bounded display lists.
+    // Each list gets its own bound, so newer pending rows can never push a set-aside row out of
+    // "held" (a parked row silently missing there is the costliest miss).
     if (c.req.query("candidates") === "1") {
-      const heldAndNext = repo.list({ destinationSession: session, state: ["pending", "blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const held = repo.list({ destinationSession: session, state: ["blocked"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const next = repo.list({ destinationSession: session, state: ["pending"], limit: WORK_CANDIDATE_LIST_LIMIT + 1 });
+      const heldTruncated = held.length > WORK_CANDIDATE_LIST_LIMIT;
+      const nextTruncated = next.length > WORK_CANDIDATE_LIST_LIMIT;
       const workCandidates = deriveWorkCandidates(
-        [...inProgress, ...heldAndNext.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
+        [...inProgress, ...held.slice(0, WORK_CANDIDATE_LIST_LIMIT), ...next.slice(0, WORK_CANDIDATE_LIST_LIMIT)],
         missionsRoot,
-        {
-          getRow: (qitemId) => repo.getById(qitemId) ?? null,
-          continuationOf: (qitemId) => repo.currentParkContinuation(qitemId),
-        },
+        lookups,
       );
-      return c.json({ ...position, ...derived, role,
-        workCandidates: { ...workCandidates, heldAndNextTruncated: heldAndNext.length > WORK_CANDIDATE_LIST_LIMIT } });
+      return c.json({ ...position, ...derived, ...choiceField, role,
+        // heldAndNextTruncated stays for trace scripts that predate the per-list flags.
+        workCandidates: { ...workCandidates, heldTruncated, nextTruncated, heldAndNextTruncated: heldTruncated || nextTruncated } });
     }
-    return c.json({ ...position, ...derived, role });
+    return c.json({ ...position, ...derived, ...choiceField, role });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
@@ -923,15 +962,19 @@ export function queueRoutes(): Hono {
     const sourceSession = c.req.query("sourceSession") || undefined;
     const stateRaw = c.req.query("state") || undefined;
     const targetRepo = c.req.query("targetRepo") || undefined;
-    const userLimit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+    const parsedLimit = queryLimit(c);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const userLimit = parsedLimit.limit;
     const asSession = c.req.query("as") || undefined;
     const compact = c.req.query("compact") === "1";
     const rig = c.req.query("rig") || undefined;
     const activeOnly = c.req.query("activeOnly") === "1";
     const attention = c.req.query("attention") === "1";
 
+    // Trim each name so "pending, in-progress" matches like "pending,in-progress". A blank name
+    // stays in the filter (it matches no row), so a filter of only commas or spaces stays explicit.
     const state: QueueState[] | undefined = stateRaw
-      ? (stateRaw.split(",") as QueueState[])
+      ? (stateRaw.split(",").map((s) => s.trim()) as QueueState[])
       : attention
         ? ["pending", "in-progress", "blocked"]
         : undefined;
@@ -989,6 +1032,10 @@ export function queueRoutes(): Hono {
     const rig = q.rig || undefined;
     const limitRaw = q.limit !== undefined ? Number.parseInt(q.limit, 10) : undefined;
     const limit = limitRaw !== undefined && Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
+    // findOverdue binds the limit into SQL; refuse a value SQLite cannot bind rather than answer 500.
+    if (limit !== undefined && limit >= SQL_LIMIT_BOUND) {
+      return c.json({ error: "limit must be an integer" }, 400);
+    }
     const compact = q.compact === "1" || q.compact === "true";
     const items = getRepo(c).findOverdue({ rig, limit, compact });
     return c.json(items);
@@ -1017,7 +1064,9 @@ export function queueRoutes(): Hono {
 
   // GET /recent-transitions — one bounded, read-only topology chronology over
   // typed queue state/closure facts. `scope=instance` spans local rigs in ONE
-  // read; a rig query stays backward-compatible. MUST precede /:qitemId.
+  // read; a rig query stays backward-compatible. Each entry's `summary` is the authored
+  // subject (null when none); `bodyPreview` is display text derived from the body for a row
+  // with no summary (see RecentQueueTransition). MUST precede /:qitemId.
   app.get("/recent-transitions", (c) => {
     const scopeKind = c.req.query("scope")?.trim();
     const rig = c.req.query("rig")?.trim();
@@ -1085,9 +1134,29 @@ export function queueRoutes(): Hono {
   // GET /:qitemId — show one
   app.get("/:qitemId", (c) => {
     const qitemId = c.req.param("qitemId");
-    const item = getRepo(c).getById(qitemId);
+    const repo = getRepo(c);
+    const item = repo.getById(qitemId);
     if (!item) return c.json({ error: "qitem_not_found" }, 404);
-    return c.json(item);
+    // #1029: the wake path's own routing decision, so a reader never guesses a registered
+    // person's alias from its spelling (there may be no wake result yet, e.g. --no-nudge).
+    // The owner notification level is what the Slack selector keys on: a registered person who
+    // is also a seat with a pane is pane-bound, yet the gateway may still post the row to them.
+    const closing = repo.closingTransition(qitemId, item.state);
+    return c.json({
+      ...item,
+      // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
+      ...(closing ? { closingTransition: {
+        transitionId: closing.transitionId,
+        ts: closing.ts,
+        state: closing.state,
+        closureReason: closing.closureReason,
+        closureTarget: closing.closureTarget,
+        actorSession: closing.actorSession,
+        transitionNote: closing.transitionNote,
+      } } : {}),
+      destinationClass: repo.classifyDestinationOf(item.destinationSession).class,
+      ownerNotificationLevel: repo.transitionLog.latestOwnerNotificationForQitem(qitemId)?.ownerNotificationLevel ?? null,
+    });
   });
 
   // ---- Inbox routes (mailbox) ----
@@ -1171,8 +1240,9 @@ export function queueRoutes(): Hono {
   app.get("/inbox/list", (c) => {
     const destinationSession = c.req.query("destinationSession");
     if (!destinationSession) return c.json({ error: "destinationSession is required" }, 400);
-    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
-    return c.json(getInbox(c).listForDestination(destinationSession, limit));
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    return c.json(getInbox(c).listForDestination(destinationSession, parsed.limit));
   });
 
   // ---- Outbox routes ----
@@ -1209,8 +1279,9 @@ export function queueRoutes(): Hono {
   app.get("/outbox/list", (c) => {
     const senderSession = c.req.query("senderSession");
     if (!senderSession) return c.json({ error: "senderSession is required" }, 400);
-    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
-    return c.json(getOutbox(c).listForSender(senderSession, limit));
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    return c.json(getOutbox(c).listForSender(senderSession, parsed.limit));
   });
 
   return app;

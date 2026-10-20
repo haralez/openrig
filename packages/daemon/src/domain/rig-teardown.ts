@@ -97,13 +97,10 @@ export class RigTeardownOrchestrator {
 
     // 3. Check if already stopped
     if (liveSessions.length === 0) {
+      // Additional intent is best-effort; keep down's existing result if it cannot be recorded.
+      await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
       this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets());
       result.alreadyStopped = true;
-      // Startup reconcile marks a seat whose terminal vanished detached and keeps its binding, which
-      // is what lets daemon start restore a lost kernel. An explicit stop request ends that the way
-      // it ends a live seat, so the next start leaves the rig down. Unclaimed seats (no binding) and
-      // older rows are left as they are.
-      for (const session of this.getLatestBoundDetachedSessions(rigId)) this.atomicNodeCleanup(session);
       // Still tear down services even if no agent sessions are running
       if (this.deps.serviceOrchestrator) {
         try {
@@ -191,6 +188,8 @@ export class RigTeardownOrchestrator {
         killFailures++;
       }
     }
+    // Stop live sessions before probing historical rows; bookkeeping must not fail down.
+    await this.recordAlreadyStoppedIntent(rigId).catch(() => {});
     this.cleanupManagedGuidanceFiles(rigId, currentLiveGuidanceTargets());
 
     // 5b. Tear down services if they exist
@@ -228,13 +227,44 @@ export class RigTeardownOrchestrator {
     return result;
   }
 
-  /** Atomically mark session exited + clear binding + persist event */
+  /** Atomically record the supported stop and clear its binding. */
   private atomicNodeCleanup(session: Pick<LatestNodeSession, "sessionId" | "nodeId">): void {
     const tx = this.db.transaction(() => {
-      this.deps.sessionRegistry.updateStatus(session.sessionId, "exited");
+      this.deps.sessionRegistry.markIntentionallyStopped(session.sessionId);
       this.deps.sessionRegistry.clearBinding(session.nodeId);
     });
     tx();
+  }
+
+  /** An explicit down also covers already-detached seats, but neither a stale
+   * row nor an unavailable probe proves that its session is absent. */
+  private async recordAlreadyStoppedIntent(rigId: string): Promise<void> {
+    const probe = this.deps.tmuxAdapter.probeSession;
+    if (!probe) return;
+    const eligible = this.db.prepare(`
+      SELECT s.id, s.node_id, s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE n.rig_id = ? AND s.status IN ('exited', 'detached')
+        AND s.intentionally_stopped = 0
+        AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
+          ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
+    `);
+    for (const row of eligible.all(rigId) as Array<{ id: string; node_id: string; session_name: string }>) {
+      const binding = this.deps.sessionRegistry.getBindingForNode(row.node_id);
+      if (binding && (binding.attachmentType !== "tmux" || binding.tmuxSession !== row.session_name)) continue;
+      try {
+        if ((await probe.call(this.deps.tmuxAdapter, row.session_name)).state !== "absent") continue;
+      } catch {
+        continue;
+      }
+      this.db.transaction(() => {
+        // A launch may have rebound the node while the absence probe awaited.
+        if ((eligible.all(rigId) as Array<{ id: string }>).some(current => current.id === row.id)
+          && JSON.stringify(this.deps.sessionRegistry.getBindingForNode(row.node_id)) === JSON.stringify(binding)) {
+          this.deps.sessionRegistry.markIntentionallyStopped(row.id);
+          this.deps.sessionRegistry.clearBinding(row.node_id);
+        }
+      })();
+    }
   }
 
   /** Atomically delete rig + persist rig.deleted event */
@@ -251,19 +281,6 @@ export class RigTeardownOrchestrator {
     this.deps.eventBus.notifySubscribers({
       type: "rig.deleted", rigId, seq: persistedSeq, createdAt: persistedAt,
     });
-  }
-
-  /** Newest session per node that is detached and still the node's bound session. */
-  private getLatestBoundDetachedSessions(rigId: string): Array<{ sessionId: string; nodeId: string }> {
-    return this.db.prepare(`
-      SELECT s.id AS sessionId, s.node_id AS nodeId
-      FROM nodes n
-      JOIN sessions s ON s.node_id = n.id
-      JOIN bindings b ON b.node_id = n.id AND b.tmux_session = s.session_name
-      WHERE n.rig_id = ?
-        AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
-        AND s.status = 'detached'
-    `).all(rigId) as Array<{ sessionId: string; nodeId: string }>;
   }
 
   /** Get latest session per node, filtered to live statuses.

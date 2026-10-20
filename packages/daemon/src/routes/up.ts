@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { readSeatEnvOverride } from "../domain/seat-env.js";
 import { Hono } from "hono";
 import { bootstrapFailureResponse } from "./bootstrap-failure-response.js";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
@@ -17,6 +18,7 @@ import { MultiRigLauncher } from "../domain/topology/multi-rig-launcher.js";
 import { remoteUpLeaf } from "../domain/topology/remote-up-leaf.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { HttpHostEntry } from "../domain/hosts/hosts-registry-reader.js";
+import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 
 export const upRoutes = new Hono();
 
@@ -51,7 +53,7 @@ export function buildAttentionResponse(result: {
   const nodeCount = detail.attentionNodes.length;
   const sessionAttachHints = detail.attentionNodes
     .filter((n) => n.sessionName)
-    .map((n) => `tmux attach -t ${n.sessionName}`)
+    .map((n) => tmuxAttachCommand(n.sessionName))
   const visibleAttachHints = sessionAttachHints.slice(0, 3).join(" ; ");
   const remainingAttachHintCount = Math.max(0, sessionAttachHints.length - 3);
   const attachHintText = visibleAttachHints
@@ -192,6 +194,9 @@ upRoutes.post("/", async (c) => {
   if (!sourceRef) {
     return c.json({ error: "sourceRef is required" }, 400);
   }
+
+  // `rig up --env KEY=VALUE`: environment for this launch only. It is not saved with the rig.
+  const envOverride = readSeatEnvOverride(body["envOverride"]);
 
   // Route source — classify raw sourceRef first, only resolve path for file-based kinds
   let sourceKind: string;
@@ -358,6 +363,7 @@ upRoutes.post("/", async (c) => {
         autoApprove,
         nonInterruptive,
         cwdOverride,
+        envOverride,
         targetRoot,
         runId: run.id,
       });

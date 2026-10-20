@@ -25,7 +25,7 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import type Database from "better-sqlite3";
-import { deriveCrossHostSuccessorId, type QueueItem, type QueueRepository } from "./queue-repository.js";
+import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -222,25 +222,36 @@ function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) 
   };
 }
 
-function hasSeatTargetSuccessor(db: Database.Database, sourceQitemId: string, target: string): boolean {
-  try {
-    const successor = db
-      .prepare(
-        `SELECT 1 FROM queue_items s
-          WHERE (s.destination_session = ? OR s.qitem_id = ?) AND s.qitem_id != ?
-            AND (s.handed_off_from = ? OR (
-              s.chain_of_record IS NOT NULL
-              AND json_valid(s.chain_of_record)
-              AND EXISTS (
-                SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
-              )
-            )) LIMIT 1`,
-      )
-      .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
-    return Boolean(successor);
-  } catch {
-    return false;
+/** Custody verification for a human destination belongs to its closing agent.
+ *  Use the closing transition, including archived history; later same-state notes
+ *  and delivery receipts do not transfer responsibility. A newer cancellation
+ *  without closure metadata still supersedes an older closing actor. */
+function custodyFindingRoute(db: Database.Database, queueRepo: QueueRepository, row: QueueItem): string {
+  // Unknown identity cannot establish a new owner. The caller retains this row's
+  // established destination if the registry needed for classification is unavailable.
+  if (!queueRepo.isHumanDestination(row.destinationSession)) return row.destinationSession;
+  const closure = db.prepare(
+    `SELECT actor_session FROM (
+       SELECT transition_id, state, actor_session, closure_reason,
+              LAG(state) OVER (ORDER BY transition_id) AS previous_state
+         FROM (
+           SELECT transition_id, state, actor_session, closure_reason FROM queue_transitions WHERE qitem_id = ?
+           UNION ALL
+           SELECT transition_id, state, actor_session, closure_reason FROM queue_transitions_archive WHERE qitem_id = ?
+         )
+     ) WHERE state IN ('done', 'canceled', 'handed-off')
+         AND (state IS NOT previous_state OR closure_reason IS NOT NULL)
+       ORDER BY transition_id DESC LIMIT 1`,
+  ).get(row.qitemId, row.qitemId) as { actor_session: string } | undefined;
+  for (const session of [closure?.actor_session, row.sourceSession]) {
+    if (!session || session === "daemon@kernel" || session.endsWith("@system")) continue;
+    if (!queueRepo.isHumanDestination(session) && queueRepo.acceptsDestination(session)) {
+      return session;
+    }
   }
+  // No admitted agent is attributable: retain the established durable destination
+  // rather than inventing a seat or failing the sweep on an unknown actor's rig.
+  return row.destinationSession;
 }
 
 function hasLiveLadder(db: Database.Database, qitemId: string): boolean {
@@ -495,8 +506,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // whoever performed the registered-host read (read from active + archived transitions).
     // Historical source rows are never mutated by this detector — the disposition note is the
     // verifier's act, not ours.
-    // Real handoffs (state='handed-off') create their successor in the same transaction and cannot
-    // be missing one (#341); skipping them removes most of the scan.
+    // Internal handoffs record handed_off_to. A generic reclose can retain an old
+    // owner, so skip only recorded handoffs whose current target still matches (#341).
     // Closures outside the recent 24-hour window without open findings are skipped so upgrading
     // a real queue history does not raise a flood of historical findings.
     const custodyHours = deps.custodyWindowHours ?? STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
@@ -518,15 +529,27 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     }
     const custodyRows = deps.db
       .prepare(
-        `SELECT q.qitem_id FROM queue_items q
-          WHERE q.state IN ('done', 'canceled')
-            AND (q.closure_target LIKE 'qitem-%' OR q.closure_reason = 'handed_off_to')
-            AND (q.ts_updated >= ? OR q.qitem_id IN (SELECT value FROM json_each(?)))`,
+        // Bound candidates before checking state: including handed-off in the
+        // state index scan would otherwise revisit all historical atomic handoffs.
+        `WITH custody_candidates AS MATERIALIZED (
+           SELECT qitem_id, state, handed_off_to, closure_target, closure_reason
+             FROM queue_items WHERE ts_updated >= ?
+           UNION
+           SELECT qitem_id, state, handed_off_to, closure_target, closure_reason
+             FROM queue_items WHERE qitem_id IN (SELECT value FROM json_each(?))
+         )
+         SELECT q.qitem_id FROM custody_candidates q
+          WHERE (q.state IN ('done', 'canceled') OR (q.state = 'handed-off'
+            AND (q.handed_off_to IS NULL OR q.closure_target IS NOT q.handed_off_to)))
+            AND (q.closure_target LIKE 'qitem-%' OR q.closure_reason = 'handed_off_to')`,
       )
       .all(custodyCutoff, JSON.stringify(openDanglingIds)) as Array<{ qitem_id: string }>;
     for (const { qitem_id } of custodyRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
+      // Local recorded targets were filtered in SQL; remote keys use the same
+      // derivation as the cross-host close, without reading successor history.
+      if (row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitemId, row.handedOffTo, row.closureTarget)) continue;
       const targets = (row.closureTarget ?? row.handedOffTo ?? "")
         .split(",")
         .map((target) => target.trim())
@@ -548,15 +571,29 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
               successorId === deriveCrossHostSuccessorId(row.qitemId, row.handedOffTo, hostId)
             );
           }
+          if (target === row.qitemId) return true;
           return !deps.queueRepo.getById(target);
         }
-        return !hasSeatTargetSuccessor(deps.db, row.qitemId, target);
+        try {
+          return !hasLinkedSuccessor(deps.db, row.qitemId, target);
+        } catch {
+          return true;
+        }
       });
       if (verificationTargets.length === 0) continue;
+      let route = row.destinationSession;
+      try {
+        route = custodyFindingRoute(deps.db, deps.queueRepo, row);
+      } catch (err) {
+        if (!(err instanceof QueueRepositoryError) || err.code !== "human_registry_unavailable") throw err;
+        // The registry may not exist before the first human is registered. Losing
+        // owner refinement must not stop unrelated findings or their resolution.
+        log(`[stuck-sweep] keeping custody route for ${row.qitemId} at ${row.destinationSession}: ${err.message}`);
+      }
       candidates.push({
         kind: "dangling-closure",
         row,
-        route: row.destinationSession,
+        route,
         ageMinutes: minutesSince(row.tsUpdated, now),
         evidenceAt: latestIso(row.tsUpdated),
         why: `closed (${row.closureReason ?? "?"}) with successor custody that this local store cannot fully verify`,
@@ -580,8 +617,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       liveDedupTags.add(dedupTag);
       const existing = deps.db
         .prepare(
+          // The first term is implied by the second (its pattern starts with that literal); it lets
+          // the planner use idx_queue_items_recovery_tags (migration 099) instead of a full scan.
           `SELECT qitem_id, source_session, state, ts_updated FROM queue_items
-            WHERE tags LIKE ?
+            WHERE (tags LIKE '%"stuck-sweep:%') AND tags LIKE ?
             ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
                      ts_updated DESC, ts_created DESC, qitem_id DESC
             LIMIT 1`,
@@ -594,7 +633,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         // Age is derived at read time; an unchanged scan is not a transition.
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
       } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
-        const created = await deps.queueRepo.create({
+        const input = {
           qitemId: recoveryId(deps.db, c.row.qitemId),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
@@ -604,7 +643,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
           summary: `Stuck sweep: ${c.verificationTargets ? "successor-verification-required" : c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
           evidenceRef: `rig queue show ${c.row.qitemId}`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag, recoveryTag(c.row.qitemId)],
-        });
+        };
+        const created = await deps.queueRepo.create(input);
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });
       }
     }

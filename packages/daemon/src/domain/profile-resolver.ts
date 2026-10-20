@@ -8,6 +8,7 @@ import type {
   SkillResource, GuidanceResource, SubagentResource, RuntimeResource, PluginResource,
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
+import { resolveAuthoredCwd } from "./cwd-resolution.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { discoverSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
@@ -28,6 +29,12 @@ export interface ResolvedResources {
   subagents: QualifiedResource[];
   plugins: QualifiedResource[];
   runtimeResources: QualifiedResource[];
+}
+
+/** Where each selected plugin resolved to, as the projection and the plugin-skill loadout see it. */
+export function selectedPluginPaths(resources: ResolvedResources): string[] {
+  return resources.plugins.map((plugin) =>
+    resolvePluginPath((plugin.resource as PluginResource).source.path, plugin.sourcePath));
 }
 
 export interface ResolvedNodeConfig {
@@ -88,6 +95,19 @@ export interface ResolutionContext {
 export type ResolutionResult =
   | { ok: true; config: ResolvedNodeConfig }
   | { ok: false; errors: string[] };
+
+/** Inspect only the authored runtime-resource selection: no skill discovery, projection or startup resolution. */
+export function resolveProfileRuntimeResources(
+  base: ResolvedAgentSpec, imports: ResolvedAgentSpec[], profileName: string,
+): { ok: true; resources: QualifiedResource[] } | { ok: false; errors: string[] } {
+  const profile = base.spec.profiles[profileName];
+  if (!profile) return { ok: false, errors: [`Profile "${profileName}" not found in spec "${base.spec.name}"`] };
+  const errors: string[] = [];
+  const selected = resolveProfileUses({ ...profile, uses: {
+    skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: profile.uses.runtimeResources,
+  } }, buildResourcePool(base, imports), base.spec.name, errors);
+  return selected ? { ok: true, resources: selected.runtimeResources } : { ok: false, errors };
+}
 
 // -- Constants --
 
@@ -154,9 +174,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
 
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)
-    : ctx.specRoot
-      ? (nodePath.isAbsolute(member.cwd) ? member.cwd : nodePath.resolve(ctx.specRoot, member.cwd))
-      : member.cwd;
+    : resolveAuthoredCwd(member.cwd, ctx.specRoot || null);
 
   // 2b. Augment the pool with filesystem-discovered skills. Rig-local
   // resources.skills (already in the pool from buildResourcePool) win

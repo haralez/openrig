@@ -152,7 +152,7 @@ describe("daemon start with an existing kernel rig", () => {
       expect(restore).not.toHaveBeenCalled();
     });
 
-  it("`rig down` leaves an unclaimed detached seat and older rows as they are", async () => {
+  it("`rig down` records intentional stops for absent seats, including an unclaimed one", async () => {
     const h = host();
     h.reboot();
     await h.reconcile();
@@ -160,7 +160,7 @@ describe("daemon start with an existing kernel rig", () => {
     const [operator, advisor] = h.nodes;
     h.sessionRegistry.clearBinding(operator!.node.id);
     await h.down();
-    expect(h.statuses()).toEqual(["detached", "exited"]);
+    expect(h.statuses()).toEqual(["exited", "exited"]);
     expect(h.sessionRegistry.getBindingForNode(advisor!.node.id)).toBeNull();
   });
 
