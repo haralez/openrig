@@ -489,6 +489,7 @@ status); a restore that returned without a ready kernel exits 1.
             keptDown: keptDown.map(keptDownEntry),
             restoredRigs: [],
             previewErrors: previewErrors.length > 0 ? previewErrors : undefined,
+            kernelRestore,
           }));
         }
         if (lastOnly && previewErrors.length > 0) process.exitCode = 1;

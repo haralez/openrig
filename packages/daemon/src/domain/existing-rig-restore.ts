@@ -163,7 +163,8 @@ export async function automaticRestoreOverrides(
     return fresh || corrected ? [{ nodeId: node.id, corrected, correction: corrected ? row : undefined }] : [];
   });
   // Never queue a lease behind a launch that will rebind that very lease's target.
-  await attempt.outcome;
+  const completed = await attempt.outcome.then(() => true, () => false);
+  if (!completed) return { replacements: [] };
   const stillLaunched = (nodeId: string, row: SeatRow | undefined) => !!row && row.id === attempt.launched.get(nodeId);
   if (opts?.nonInterruptive !== undefined && opts.nonInterruptive !== deps.rigRepo.getRigNonInterruptive(rigId)
     && rig.nodes.some(node => stillLaunched(node.id, newest(node.id)))) {
@@ -261,8 +262,8 @@ export async function joinAutomaticRestore(
   };
   if (!attempt.settled) {
     if (!held(true)) return null;
-    const outcome = await attempt.outcome;
-    return held(false) ? outcome : null;
+    const outcome = await attempt.outcome.catch(() => null);
+    return outcome && held(false) ? outcome : null;
   }
   const current = rig();
   if (!current || !held(false) || !attemptStillRunning(db, current, attempt)) return null;

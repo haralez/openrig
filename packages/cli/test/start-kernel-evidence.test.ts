@@ -15,13 +15,19 @@ afterEach(async () => {
   for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
   vi.restoreAllMocks(); resetFetchAllowlist(); process.exitCode = 0;
 });
-async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200, kernelExtra: Record<string, unknown> = {}, json = false, kernelDetail = "fixture detail") {
+async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200, kernelExtra: Record<string, unknown> = {}, json = false, kernelDetail = "fixture detail", keptDown = false) {
   const received: string[] = [];
   const server = http.createServer((request, response) => {
     received.push(request.url!);
     const kernel = request.url === "/api/kernel/status";
     response.writeHead(kernel ? httpStatus : request.url === "/api/rigs/summary" ? summaryStatus : 200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify(kernel ? { kernel_state: kernelState, detail: kernelDetail, ...kernelExtra } : request.url === "/api/rigs/summary" ? (summaryStatus === 200 ? [] : [{ id: "restorable-rig", name: "work", nodeCount: 1, lifecycleState: "recoverable" }]) : { ok: true }));
+    const stopped = { id: "restorable-rig", name: "work", nodeCount: 1, lifecycleState: "recoverable" };
+    const payload = kernel ? { kernel_state: kernelState, detail: kernelDetail, ...kernelExtra }
+      : request.url === "/api/rigs/summary" ? (summaryStatus === 200 && !keptDown ? [] : [stopped])
+      : keptDown && request.url === "/api/rigs/restorable-rig/up" ? { status: "plan", nodes: [] }
+      : keptDown && request.url === "/api/rigs/restorable-rig/nodes" ? [{ sessionStatus: "exited", intentionallyStopped: true }]
+      : { ok: true };
+    response.end(JSON.stringify(payload));
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); }); servers.push(server);
   const port = (server.address() as { port: number }).port;
@@ -37,7 +43,7 @@ async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200, 
   const logs: string[] = [];
   vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.join(" ")); });
   vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.join(" ")); });
-  await startCommand({ lifecycleDeps, clientFactory: (base) => new DaemonClient(base) }).parseAsync(["--all", ...(json ? ["--json"] : [])], { from: "user" });
+  await startCommand({ lifecycleDeps, clientFactory: (base) => new DaemonClient(base) }).parseAsync([keptDown ? "--last" : "--all", ...(json ? ["--json"] : [])], { from: "user" });
   return { errors: errors.join("\n"), logs: logs.join("\n"), received, exitCode: process.exitCode ?? 0 };
 }
 describe("rig start kernel wait evidence", () => {
@@ -132,4 +138,14 @@ it.each([401, 503])("does not report successful empty restore discovery after HT
   expect(result.received).toContain("/api/rigs/summary");
   expect(result.received).not.toContain("/api/rigs/restorable-rig/up");
   expect(result.received.filter((path) => path.endsWith("/up"))).toEqual([]);
+});
+
+it.each([["booting", "in_progress", "restoring", 0], ["bootstrap_failed", "finished", "failed", 1]] as const)("--last JSON keeps kernel restore evidence when every rig stays down: %s", async (state, phase, outcome, exitCode) => {
+  const result = await run(state, 200, 200, { existing_restore: phase }, true, "fixture detail", true);
+  expect(JSON.parse(result.logs.split("\n").at(-1)!)).toMatchObject({
+    status: "started", kernelRestore: { state: outcome, kernelState: state },
+    keptDown: [{ rigName: "work", restoreCommand: "rig start --rigs work" }], restoredRigs: [],
+  });
+  expect(result.exitCode).toBe(exitCode);
+  expect(result.received.filter(path => path.endsWith("/up"))).toEqual(["/api/rigs/restorable-rig/up"]); // Plan only.
 });

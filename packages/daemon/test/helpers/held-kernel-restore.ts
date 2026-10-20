@@ -17,7 +17,7 @@ export const corrected = "00000000-0000-4000-8000-000000001079";
 
 /** A lost kernel whose automatic restore is held: before tmux creates the session (`at: "create"`),
  *  or once the new session row exists and the runtime is launching (`at: "launch"`). */
-export async function heldRestore(opts: { at: "create" | "launch"; launchFails?: boolean; sibling?: boolean; nonInterruptive?: boolean }) {
+export async function heldRestore(opts: { at: "create" | "launch"; launchFails?: boolean; sibling?: boolean; nonInterruptive?: boolean; automaticReject?: boolean }) {
   const db = createFullTestDb();
   // Including the seat delivery guard's tables, which the full test database leaves out.
   migrate(db, ALL_MIGRATIONS);
@@ -91,6 +91,11 @@ export async function heldRestore(opts: { at: "create" | "launch"; launchFails?:
   const snapshot = snapshotCapture.captureSnapshot(rig.id, "manual");
   live.clear();
   await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rig.id);
+
+  if (opts.automaticReject) vi.spyOn(restoreOrchestrator, "restore").mockImplementationOnce(async () => {
+    entered(); await gate;
+    throw new Error("fixture automatic restore rejected before taking leases");
+  });
 
   let automatic!: Promise<{ errors: string[] }>;
   const tracker = await bootKernelIfNeeded({ rigRepo, sessionRegistry, eventBus, bootstrapOrchestrator: setup.bootstrapOrchestrator,
