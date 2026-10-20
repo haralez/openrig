@@ -157,7 +157,7 @@ export async function automaticRestoreOverrides(
     const row = newest(node.id);
     const target = resolveActiveSnapshotSession(snapshot.data, node.id);
     const fresh = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
-    const corrected = !fresh && row?.id === attempt.launched.get(node.id) && row?.provenance === "operator"
+    const corrected = !opts?.freshLogicalIds?.length && row?.id === attempt.launched.get(node.id) && row?.provenance === "operator"
       && !!row.resumeToken && target.kind === "resolved"
       && (row.resumeType !== target.session.resumeType || row.resumeToken !== target.session.resumeToken);
     return fresh || corrected ? [{ nodeId: node.id, corrected, correction: corrected ? row : undefined }] : [];

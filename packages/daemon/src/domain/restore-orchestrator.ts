@@ -733,6 +733,14 @@ export class RestoreOrchestrator {
     for (const session of this.sessionRegistry.getSessionsForRig(rigId)) {
       if (session.status !== "running" || (selectedIds && !selectedIds.has(session.nodeId))) continue;
       try {
+        // Replacement must preserve unknown transport state before any reconciliation write.
+        if (selectedIds) {
+          const probe = await this.tmuxAdapter.probeSession(session.sessionName);
+          if (probe.state === "present") live.push(session.id);
+          else if (probe.state === "absent") stale.push(session.id);
+          else unknown.push(session.id);
+          continue;
+        }
         const alive = await this.tmuxAdapter.hasSession(session.sessionName);
         if (alive) {
           live.push(session.id);

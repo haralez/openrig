@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { heldRestore, name, corrected } from "./helpers/held-kernel-restore.js";
 
 describe("explicit changes after automatic kernel restore", () => {
@@ -78,11 +79,13 @@ describe("explicit changes after automatic kernel restore", () => {
       });
       if (fault === "stop-failed") vi.mocked(h.tmux.killSession).mockResolvedValue({ ok: false, code: "fixture_stop_failed" } as never);
       if (fault === "absence-unknown") vi.mocked(h.tmux.probeSession)
-        .mockResolvedValueOnce({ state: "present" }).mockResolvedValue({ state: "transport_unavailable" } as never);
+        .mockResolvedValueOnce({ state: "present" }).mockResolvedValueOnce({ state: "present" })
+        .mockResolvedValue({ state: "transport_unavailable" } as never);
       if (fault === "launch-failed") vi.mocked(h.tmux.createSession).mockResolvedValue({ ok: false, code: "fixture_launch_failed" } as never);
       const response = await h.up({ freshLogicalIds: ["operator.agent"] });
       const body = await response.json();
-      expect(body.nodes).toEqual([expect.objectContaining({ status: "failed" })]);
+      if (fault === "unknown") expect(response.status).toBe(409);
+      else expect(body.nodes).toEqual([expect.objectContaining({ status: "failed" })]);
       const stopped = ["absence-unknown", "launch-failed"].includes(fault);
       expect(h.tmux.killSession).toHaveBeenCalledTimes(stopped || fault === "stop-failed" ? 1 : 0);
       expect(h.tmux.createSession).toHaveBeenCalledTimes(fault === "launch-failed" ? 2 : 1);
@@ -120,6 +123,39 @@ describe("explicit changes after automatic kernel restore", () => {
       expect(await response.json()).toMatchObject({ nodes: [{ logicalId: "operator.agent", status: "resumed" }] });
       expect(h.adapter.launchHarness.mock.calls.at(-1)?.[1].resumeToken).toBe(corrected);
       expect(h.tmux.createSession).toHaveBeenCalledTimes(2);
+    } finally { h.close(); }
+  });
+
+  it("--fresh does not include an independently corrected sibling", async () => {
+    const h = await heldRestore({ at: "launch", sibling: true });
+    try {
+      await h.finish();
+      const update = await h.post("/api/sessions/advisor-agent@kernel/resume-token", { token: corrected, reason: "advisor correction" });
+      expect(update.status).toBe(200);
+      const before = h.sessionRegistry.getSessionsForRig(h.rig.id).find(s => s.sessionName === "advisor-agent@kernel" && s.status === "running")!;
+      const response = await h.up({ freshLogicalIds: ["operator.agent"] });
+      const body = await response.json();
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      expect(body.nodes).toEqual([expect.objectContaining({ logicalId: "operator.agent", status: "fresh-primed" })]);
+      expect(h.tmux.killSession).toHaveBeenCalledTimes(1);
+      expect(h.tmux.killSession).toHaveBeenCalledWith(name);
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(3);
+      expect(h.db.prepare("SELECT status, resume_token FROM sessions WHERE id = ?").get(before.id)).toEqual({ status: "running", resume_token: corrected });
+    } finally { h.close(); }
+  });
+
+  it("a collapsed false liveness check cannot detach an unreadable startup occupant", async () => {
+    const h = await heldRestore({ at: "launch" });
+    try {
+      await h.finish();
+      const own = h.sessionRegistry.getSessionsForRig(h.rig.id).find(s => s.status === "running")!;
+      vi.mocked(h.tmux.hasSession).mockImplementation(n => TmuxAdapter.prototype.hasSession.call(h.tmux, n));
+      vi.mocked(h.tmux.probeSession).mockResolvedValue({ state: "transport_unavailable", detail: "fixture transport unavailable" } as never);
+      const response = await h.up({ freshLogicalIds: ["operator.agent"] });
+      expect(h.tmux.killSession).not.toHaveBeenCalled();
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(h.db.prepare("SELECT status FROM sessions WHERE id = ?").get(own.id)).toEqual({ status: "running" });
+      expect(response.status).toBe(409);
     } finally { h.close(); }
   });
 
