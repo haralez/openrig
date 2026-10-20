@@ -18,6 +18,7 @@ describe("real automatic kernel restore and manual-up race", () => {
     const atLaunch = new Promise<void>(r => { entered = r; });
     const launchGate = new Promise<void>(r => { release = r; });
     const tmux = {
+      startServer: vi.fn(async () => ({ ok: true })),
       hasSession: vi.fn(async (n: string) => live.has(n)),
       probeSession: vi.fn(async (n: string) => ({ state: live.has(n) ? "present" : "absent" })),
       listSessions: vi.fn(async () => [...live].map(name => ({ name }))),
@@ -83,10 +84,11 @@ describe("real automatic kernel restore and manual-up race", () => {
         await atLaunch;
         if (mode === "auto-first-fresh") {
           // A request for a different restore is not merged into the running one.
-          const collision = await up({ freshLogicalIds: ["operator.agent"] });
-          expect(collision.status).toBe(400);
-          expect(await collision.json()).toMatchObject({ code: "restore_in_progress" });
+          const replacement = up({ freshLogicalIds: ["operator.agent"] });
           release();
+          const response = await replacement;
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({ nodes: [{ logicalId: "operator.agent", status: "fresh-primed" }] });
         } else {
           // The same restore, asked for by hand: it waits for the running one instead of colliding.
           let settled = false;
@@ -106,7 +108,7 @@ describe("real automatic kernel restore and manual-up race", () => {
       await new Promise<void>(r => setImmediate(r));
       const status = tracker.getStatus();
       expect(status.kernelState).toBe(mode === "manual-first" ? "skipped" : "ready");
-      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(tmux.createSession).toHaveBeenCalledTimes(mode === "auto-first-fresh" ? 2 : 1);
       expect(sessionRegistry.getSessionsForRig(rig.id).filter(s => s.status === "running")).toHaveLength(1);
       if (mode === "auto-rehydrate") {
         expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots WHERE kind = 'auto-rehydrate'").get()).toEqual({ n: 1 });

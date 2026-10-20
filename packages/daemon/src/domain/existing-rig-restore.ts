@@ -67,7 +67,7 @@ export async function runExistingRigRestore(
   choice: Extract<RestoreSnapshotChoice, { ok: true }>,
   opts: {
     freshLogicalIds?: string[]; nonInterruptive?: boolean; exists: (path: string) => boolean;
-    onSnapshot?: (snapshotId: string) => void; onSessionLaunched?: (nodeId: string, sessionId: string) => void;
+    automatic?: boolean; onSnapshot?: (snapshotId: string) => void; onSessionLaunched?: (nodeId: string, sessionId: string) => void;
   },
 ) {
   let { snapshot, snapshotSelection } = choice;
@@ -94,6 +94,7 @@ export async function runExistingRigRestore(
     nonInterruptive: opts.nonInterruptive,
     snapshotSelection,
     onSessionLaunched: opts.onSessionLaunched,
+    automatic: opts.automatic,
   });
   return { snapshot, capturedCurrentState, result };
 }
@@ -129,6 +130,55 @@ function automaticRestore(db: Database.Database, rigId: string): AutomaticRestor
 export async function settleAutomaticRestore(db: Database.Database, rigId: string): Promise<void> {
   const attempt = automaticRestore(db, rigId);
   if (attempt && !attempt.settled) await attempt.outcome.catch(() => undefined);
+}
+
+/** Exact startup-owned occupant and operator target captured for one explicit replacement. */
+export type AutomaticSeatReplacement = {
+  nodeId: string; sessionId: string; resumeType: string | null; resumeToken: string | null;
+  corrected: boolean;
+};
+
+/** Resolve explicit overrides before acquiring lifecycle leases. Merely editing a token never
+ * invokes this: only an explicit restore/up asks to replace startup's exact occupant. */
+export async function automaticRestoreOverrides(
+  deps: Pick<ExistingRigRestoreDeps, "rigRepo" | "snapshotRepo">, rigId: string,
+  opts?: { freshLogicalIds?: string[]; nonInterruptive?: boolean },
+): Promise<{ replacements: AutomaticSeatReplacement[]; refusal?: string }> {
+  const db = deps.snapshotRepo.db;
+  const attempt = automaticRestore(db, rigId);
+  const snapshot = attempt?.snapshotId ? deps.snapshotRepo.getSnapshot(attempt.snapshotId) : null;
+  const rig = deps.rigRepo.getRig(rigId);
+  if (!attempt || !snapshot || !rig) return { replacements: [] };
+  const newest = (nodeId: string) => db.prepare(
+    `SELECT id, resume_type AS resumeType, resume_token AS resumeToken, resume_provenance AS provenance
+     FROM sessions WHERE node_id = ? AND status NOT IN ('superseded', 'exited') ORDER BY created_at DESC, id DESC LIMIT 1`,
+  ).get(nodeId) as SeatRow | undefined;
+  const requested = rig.nodes.flatMap(node => {
+    const row = newest(node.id);
+    const target = resolveActiveSnapshotSession(snapshot.data, node.id);
+    const fresh = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
+    const corrected = !fresh && row?.id === attempt.launched.get(node.id) && row?.provenance === "operator"
+      && !!row.resumeToken && target.kind === "resolved"
+      && (row.resumeType !== target.session.resumeType || row.resumeToken !== target.session.resumeToken);
+    return fresh || corrected ? [{ nodeId: node.id, corrected, correction: corrected ? row : undefined }] : [];
+  });
+  // Never queue a lease behind a launch that will rebind that very lease's target.
+  await attempt.outcome;
+  const stillLaunched = (nodeId: string, row: SeatRow | undefined) => !!row && row.id === attempt.launched.get(nodeId);
+  if (opts?.nonInterruptive !== undefined && opts.nonInterruptive !== deps.rigRepo.getRigNonInterruptive(rigId)
+    && rig.nodes.some(node => stillLaunched(node.id, newest(node.id)))) {
+    return { replacements: [], refusal: "The running launch choice is unchanged. Stop the rig with 'rig down', then rerun with the requested non-interruptive choice." };
+  }
+  const replacements: AutomaticSeatReplacement[] = [];
+  for (const request of requested) {
+    const row = newest(request.nodeId);
+    if (!stillLaunched(request.nodeId, row)) continue;
+    if (request.correction && (request.correction.id !== row!.id || row!.provenance !== "operator"
+      || row!.resumeType !== request.correction.resumeType || row!.resumeToken !== request.correction.resumeToken)) continue;
+    replacements.push({ nodeId: request.nodeId, sessionId: row!.id, resumeType: row!.resumeType,
+      resumeToken: row!.resumeToken, corrected: request.corrected });
+  }
+  return { replacements };
 }
 
 type SeatRow = { id: string; resumeType: string | null; resumeToken: string | null; provenance: string | null };
@@ -239,7 +289,7 @@ export function restoreExistingRigUnattended(
     const choice = chooseRestoreSnapshot(deps, rigId);
     if (!choice.ok) return { ok: false, choice };
     const run = runExistingRigRestore(deps, choice, {
-      exists,
+      exists, automatic: true,
       onSnapshot: (id) => { entry.snapshotId = id; },
       onSessionLaunched: (nodeId, sessionId) => { entry.launched.set(nodeId, sessionId); },
     });

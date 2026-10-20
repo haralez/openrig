@@ -1,7 +1,7 @@
 // #1078 — what a manual `rig up kernel --existing` does while daemon start is restoring the kernel.
 // The same restore waits for the running one and reports its outcome; a request for something else
-// (non-interruptive choice, plan) or for a target that has changed since (an operator's token
-// correction, with or without a new snapshot) is not merged. Real SQLite, reconcile, restore and HTTP
+// (non-interruptive choice, plan) is not merged. An explicit request after an operator correction
+// replaces only startup's exact corrected occupant. Real SQLite, reconcile, restore and HTTP
 // routes; terminal and provider I/O are fixtures, with the automatic launch held at a gate.
 // Derived from dev-review's boundary reproductions in its reviews of bc72e6bf and 0bd8f934.
 
@@ -70,11 +70,13 @@ describe("manual up while daemon start restores the kernel", () => {
         expect(answer.body).toMatchObject({ status: "restored", rigResult: "fully_restored" });
         expect(answer.body.warnings[0]).toContain("no second restore was started");
       } else {
-        expect(answer.status, JSON.stringify(answer.body)).toBeGreaterThanOrEqual(400);
+        expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+        expect(answer.body.nodes).toEqual([expect.objectContaining({ logicalId: "operator.agent", status: "resumed" })]);
         expect(JSON.stringify(answer.body.warnings ?? [])).not.toContain("no second restore");
+        expect(h.tmux.killSession).toHaveBeenCalledWith(name);
       }
       await h.finish();
-      expect(h.tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(joins ? 1 : 2);
     } finally { h.close(); }
   });
 });

@@ -184,12 +184,15 @@ describe("a join counts only the automatic attempt's own sessions", () => {
     } finally { h.close(); }
   });
 
-  it("an operator correction of the attempt's own session to another token is not the same target", async () => {
+  it("an explicit up after correction replaces rather than joins the startup occupant", async () => {
     const h = await heldRestore({ at: "launch" });
     try {
       h.sessionRegistry.updateResumeToken(newest(h).id, "claude_id", "00000000-0000-4000-8000-000000003078", "operator");
       const answer = await h.upWhileHeld();
-      expect(answer.status, JSON.stringify(answer.body)).toBeGreaterThanOrEqual(400);
+      expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+      expect(answer.body.nodes).toEqual([expect.objectContaining({ status: "resumed" })]);
+      expect(JSON.stringify(answer.body)).not.toContain("no second restore");
+      expect(h.tmux.createSession).toHaveBeenCalledTimes(2);
       expect(token).not.toBe("00000000-0000-4000-8000-000000003078");
     } finally { h.close(); }
   });

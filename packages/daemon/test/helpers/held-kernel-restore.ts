@@ -17,7 +17,7 @@ export const corrected = "00000000-0000-4000-8000-000000001079";
 
 /** A lost kernel whose automatic restore is held: before tmux creates the session (`at: "create"`),
  *  or once the new session row exists and the runtime is launching (`at: "launch"`). */
-export async function heldRestore(opts: { at: "create" | "launch"; launchFails?: boolean }) {
+export async function heldRestore(opts: { at: "create" | "launch"; launchFails?: boolean; sibling?: boolean; nonInterruptive?: boolean }) {
   const db = createFullTestDb();
   // Including the seat delivery guard's tables, which the full test database leaves out.
   migrate(db, ALL_MIGRATIONS);
@@ -35,35 +35,41 @@ export async function heldRestore(opts: { at: "create" | "launch"; launchFails?:
     getPaneCommand: vi.fn(async () => "sh"),
     capturePaneContent: vi.fn(async () => "Claude Code\n❯ accept edits on"),
     createSession: vi.fn(async (n: string) => {
-      if (opts.at === "create") { entered(); await gate; }
+      if (opts.at === "create" && n === name) { entered(); await gate; }
       if (opts.launchFails) return { ok: false, error: "fixture launch refused" };
       live.add(n);
       return { ok: true };
     }),
     killSession: vi.fn(async (n: string) => { live.delete(n); return { ok: true }; }),
+    startServer: vi.fn(async () => ({ ok: true })),
     setSessionOption: vi.fn(async () => ({ ok: true })),
     sendText: vi.fn(async () => ({ ok: true })),
     sendKeys: vi.fn(async () => ({ ok: true })),
   } as unknown as TmuxAdapter;
   // The production seat leases: a restore holds every seat's, and rebinds them as it launches.
   (tmux as { deliveryGuard?: SeatDeliveryGuard }).deliveryGuard = new SeatDeliveryGuard(db, (target) => resolveGuardTarget(db, target));
+  let launchedToken = token;
   const listProcesses = async () => [
     { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt: "fixture-start" },
-    { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "claude", command: `claude --resume ${token}`, startedAt: "fixture-start" },
+    { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "claude", command: `claude --resume ${launchedToken}`, startedAt: "fixture-start" },
   ];
   const adapter = {
     runtime: "claude-code",
     project: async () => ({ applied: [], skipped: [], failed: [] }),
     deliverStartup: async () => ({ delivered: [], skipped: [], failed: [] }),
-    launchHarness: async () => {
-      if (opts.at === "launch") { entered(); await gate; }
-      return { ok: true, resumeType: "claude_id", resumeToken: token };
-    },
+    launchHarness: vi.fn(async (_binding, input) => {
+      if (opts.at === "launch" && _binding.tmuxSession === name) { entered(); await gate; }
+      launchedToken = input.resumeToken ?? token;
+      return { ok: true, resumeType: "claude_id", resumeToken: launchedToken };
+    }),
     checkReady: async () => ({ ready: true }),
   };
   const setup = createTestApp(db, { tmux, listProcesses, adapters: { "claude-code": adapter } as never });
   const { rigRepo, sessionRegistry, snapshotRepo, snapshotCapture, restoreOrchestrator, eventBus, app } = setup;
+  let restoresCompleted = 0;
+  eventBus.subscribe(event => { if (event.type === "restore.completed") restoresCompleted++; });
   const rig = rigRepo.createRig("kernel");
+  if (opts.nonInterruptive !== undefined) rigRepo.setRigNonInterruptive(rig.id, opts.nonInterruptive);
   db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod1078", rig.id, "Kernel");
   const node = rigRepo.addNode(rig.id, "operator.agent", { runtime: "claude-code", cwd: "/tmp", podId: "pod1078" });
   const old = sessionRegistry.registerSession(node.id, name);
@@ -73,7 +79,16 @@ export async function heldRestore(opts: { at: "create" | "launch"; launchFails?:
   sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1078" });
   db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
     .run(node.id, "[]", "[]", "[]", "claude-code");
-  snapshotCapture.captureSnapshot(rig.id, "manual");
+  if (opts.sibling) {
+    const sibling = rigRepo.addNode(rig.id, "advisor.agent", { runtime: "claude-code", cwd: "/tmp", podId: "pod1078" });
+    const session = sessionRegistry.registerSession(sibling.id, "advisor-agent@kernel");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", token, "scrape");
+    sessionRegistry.updateBinding(sibling.id, { tmuxSession: "advisor-agent@kernel", tmuxPane: "%1079" });
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+      .run(sibling.id, "[]", "[]", "[]", "claude-code");
+  }
+  const snapshot = snapshotCapture.captureSnapshot(rig.id, "manual");
   live.clear();
   await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rig.id);
 
@@ -115,7 +130,7 @@ export async function heldRestore(opts: { at: "create" | "launch"; launchFails?:
   };
   const reconcile = () => new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rig.id);
   const close = () => { release(); tracker.stop(); db.close(); };
-  return { db, tmux, rig, node, live, sessionRegistry, tracker, post, up, upWhileHeld, finish, close, bootAgain, reconcile,
+  return { db, tmux, rig, node, snapshot, adapter, eventBus, restoresCompleted: () => restoresCompleted, live, sessionRegistry, tracker, post, up, upWhileHeld, finish, close, bootAgain, reconcile,
     automatic: () => automatic, snapshots: () =>
     (db.prepare("SELECT COUNT(*) AS n FROM snapshots").get() as { n: number }).n };
 }

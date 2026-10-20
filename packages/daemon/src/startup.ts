@@ -1092,7 +1092,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // observability. The kernel rig is still the only rig the daemon
   // auto-boots; other rigs require explicit operator-initiated
   // `rig up` / `rig restore` per amended IMPL-PRD §16.2.
-  const runtimeAdapters = { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() };
+  const runtimeAdaptersMap = withCommunityHarnessResolver({
+    "claude-code": claudeAdapter,
+    "codex": codexAdapter,
+    "pi": piAdapter,
+    "omp": ompAdapter,
+    "stub": stubAdapter,
+    "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
+  }, { tmux: tmuxAdapter, seatLaunchEnvironment });
   let kernelBootTracker: import("./domain/kernel-boot-tracker.js").KernelBootTracker | undefined;
   try {
     const { bootKernelIfNeeded } = await import("./domain/kernel-boot.js");
@@ -1116,7 +1123,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // A kernel a reboot left down comes back the way `rig up kernel --existing` brings it back.
       // Synchronous, so the restore is registered before any request can ask for the same one.
       restoreLostKernel: (rigId) =>
-        restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters, tmuxAdapter }, rigId, (p) => fs.existsSync(p)),
+        restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters: runtimeAdaptersMap, tmuxAdapter }, rigId, (p) => fs.existsSync(p)),
     });
     try {
       // eslint-disable-next-line no-console
@@ -1280,14 +1287,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Capture compatibility before the spec-library initializer creates the primary directory.
   const userSpecLibraryRoot = getDefaultOpenRigPath("specs");
   const compatibleSpecLibraryRoot = getCompatibleOpenRigPath("specs");
-  const runtimeAdaptersMap = withCommunityHarnessResolver({
-    "claude-code": claudeAdapter,
-    "codex": codexAdapter,
-    "pi": piAdapter,
-    "omp": ompAdapter,
-    "stub": stubAdapter,
-    "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
-  }, { tmux: tmuxAdapter, seatLaunchEnvironment });
+
 
   const deps: AppDeps = {
     rigRepo,
